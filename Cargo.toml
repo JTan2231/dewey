@@ -1,0 +1,11 @@
+[package]
+name = "dewey"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chrono = "0.4.38"
+glob = "0.3.1"
+native-tls = "0.2.12"
+serde = "1.0.206"
+serde_json = "1.0.122"
