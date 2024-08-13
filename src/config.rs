@@ -44,6 +44,11 @@ pub fn get_local_dir() -> std::path::PathBuf {
     home_dir.join(".local/dewey")
 }
 
+pub fn get_data_dir() -> std::path::PathBuf {
+    let home_dir = get_home_dir();
+    home_dir.join(".local/dewey/data")
+}
+
 pub fn setup() {
     let now = match DEBUG {
         true => "debug".to_string(),
@@ -57,6 +62,7 @@ pub fn setup() {
 
     let config_path = get_config_dir();
     let local_path = get_local_dir();
+    let data_path = get_data_dir();
 
     let logging_path = local_path.join("logs");
     crate::logger::Logger::init(format!(
@@ -68,6 +74,7 @@ pub fn setup() {
     create_if_nonexistent(&local_path);
     create_if_nonexistent(&config_path);
     create_if_nonexistent(&logging_path);
+    create_if_nonexistent(&data_path);
 
     touch_file(&local_path.join("ledger"));
     touch_file(&config_path.join("ledger"));

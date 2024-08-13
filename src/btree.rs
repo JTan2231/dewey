@@ -1,3 +1,5 @@
+use crate::openai::Embedding;
+
 #[derive(Debug)]
 struct BTree<T> {
     value: T,

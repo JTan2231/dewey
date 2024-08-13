@@ -1,8 +1,11 @@
-mod btree;
+/*mod btree;
+mod dbio;*/
 mod config;
 mod ledger;
 mod logger;
 mod openai;
+
+use crate::logger::Logger;
 
 struct Flags {
     sync: bool,
@@ -12,7 +15,7 @@ fn parse_flags() -> Flags {
     let args: Vec<String> = std::env::args().collect();
     let mut flags = Flags { sync: false };
 
-    if args.len() < 2 {
+    if args.len() < 1 {
         panic!("Usage: {} [-S]", args[0]);
     }
 
@@ -32,6 +35,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if flags.sync {
         ledger::sync_ledger_config()?;
+    } else {
+        let stale_files = ledger::get_stale_files();
+        let stale_sources = stale_files
+            .iter()
+            .map(|f| openai::EmbeddingSource {
+                filepath: f.clone(),
+                subset: None,
+            })
+            .collect::<Vec<_>>();
+
+        let embeddings = openai::embed(&stale_sources)?;
+        info!("Embeddings: {}", embeddings.len());
     }
 
     Ok(())

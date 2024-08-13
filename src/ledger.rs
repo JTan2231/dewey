@@ -1,3 +1,5 @@
+use sha2::digest::Update;
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, Write};
 
 use crate::logger::Logger;
@@ -48,6 +50,22 @@ fn read_ledger() -> Vec<LedgerEntry> {
     entries
 }
 
+// returns a list of files whose hashes are out of date with file contents
+pub fn get_stale_files() -> Vec<String> {
+    let ledger = read_ledger();
+    let mut stale_files = Vec::new();
+    for entry in ledger.iter() {
+        let hash = get_hash(&entry.filepath);
+        if true
+        /*hash != entry.hash*/
+        {
+            stale_files.push(entry.filepath.clone());
+        }
+    }
+
+    stale_files
+}
+
 fn is_whitelisted(path: &str) -> bool {
     for ext in WHITELIST {
         if path.ends_with(format!(".{}", ext).as_str()) {
@@ -58,13 +76,24 @@ fn is_whitelisted(path: &str) -> bool {
     false
 }
 
-fn get_hash(filepath: String) {}
+fn get_hash(filepath: &String) -> String {
+    let content = std::fs::read(filepath).expect("Failed to read file");
+    let mut hasher = Sha256::new();
+    Update::update(&mut hasher, &content);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
+}
 
 // current functionality is that it uses .gitignore files
 // to blacklist files that are under the directories
 // in the ledger config
 //
 // this should probably be expanded in the future
+//
+// this could also probably be optimized
 pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = crate::config::get_config_dir();
     let config_ledger_path = config_path.join("ledger");
@@ -84,8 +113,6 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         .map(|line| line.to_string())
         .collect::<Vec<_>>();
 
-    info!("config_ledger size: {}", config_ledger.len());
-
     let mut gitignores = Vec::new();
     let mut config_entries = Vec::new();
     for mut entry in config_ledger {
@@ -95,7 +122,6 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         for file in glob::glob(&entry).expect("Failed to read glob pattern") {
-            info!("file: {:?}", file);
             let file = file?;
             if is_whitelisted(file.to_str().unwrap()) {
                 config_entries.push(file.to_string_lossy().to_string());
@@ -149,12 +175,13 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let mut ignored_count = 0;
     config_entries = config_entries
         .into_iter()
         .filter(|entry| {
             for glob in gitignore_globs.iter() {
-                info!("evaluating: {} against {}", entry, glob);
                 if glob::Pattern::new(glob).unwrap().matches(entry) {
+                    ignored_count += 1;
                     return false;
                 }
             }
@@ -162,21 +189,20 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    info!("config_entries: {:?}", config_entries);
-
     let mut local_ledger = read_ledger();
-    info!("local_ledger: {:?}", local_ledger);
 
     // n^2 lol
     let mut new_entries = Vec::new();
     for entry in config_entries.iter() {
         if !local_ledger.iter().any(|e| e.filepath == *entry) {
             new_entries.push(entry);
-            info!("New entry: {}", entry);
         }
     }
 
+    info!("Adding {} new entries to ledger", new_entries.len());
+    info!("Ignoring {} entries", ignored_count);
     for new_entry in new_entries {
+        info!("Adding new entry to ledger: {}", new_entry);
         let entry = LedgerEntry {
             filepath: new_entry.to_string(),
             hash: "0".to_string(),
@@ -184,6 +210,12 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
 
         local_ledger.push(entry);
     }
+
+    for entry in local_ledger.iter_mut() {
+        entry.hash = get_hash(&entry.filepath);
+    }
+
+    info!("Final ledger size: {}", local_ledger.len());
 
     match std::fs::OpenOptions::new()
         .write(true)
