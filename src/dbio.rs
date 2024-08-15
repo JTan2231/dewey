@@ -1,5 +1,8 @@
-use crate::openai
+use crate::openai;
 use std::io::{Read, Write};
+
+use crate::info;
+use crate::logger::Logger;
 
 struct IndexedItem {
     filename: String,
@@ -51,13 +54,13 @@ impl IndexedItem {
 // - n bytes: EmbeddingSource
 // - 8 bytes: size of Embedding
 // - n bytes: Embedding
-struct EmbeddingBlock {
+pub struct EmbeddingBlock {
     block: u64,
-    embeddings: Vec<openai::Embedding>,
+    pub embeddings: Vec<openai::Embedding>,
 }
 
 impl EmbeddingBlock {
-    fn from_file(filename: &str) -> Result<Self, std::io::Error> {
+    pub fn from_file(filename: &str) -> Result<Self, std::io::Error> {
         let block = match filename.parse::<u64>() {
             Ok(n) => n,
             Err(_) => {
@@ -119,6 +122,8 @@ impl EmbeddingBlock {
             .map(|e| e.to_bytes())
             .collect::<Vec<_>>();
 
+        info!("{:?}", embedding_bytes);
+
         let mut offsets = Vec::new();
         let mut offset = u64_size + self.embeddings.len() * u64_size;
         for embedding_bytes in embedding_bytes.iter() {
@@ -134,6 +139,7 @@ impl EmbeddingBlock {
             bytes.extend_from_slice(&embedding_bytes);
         }
 
+        info!("Writing {} bytes to {}", bytes.len(), filename);
         file.write_all(&bytes)?;
 
         Ok(())
@@ -149,14 +155,39 @@ fn read_index() -> Result<Vec<IndexedItem>, std::io::Error> {
 // synchronizes the index with the current ledger
 // TODO: ledgers need to include subsets of files
 //       we also need a proper tokenizer
-fn sync_index() -> Result<(), std::io::Error> {
+pub fn sync_index() -> Result<(), std::io::Error> {
     let stale_files = crate::ledger::get_stale_files();
+    let stale_sources = stale_files
+        .iter()
+        .map(|f| openai::EmbeddingSource {
+            filepath: f.clone(),
+            subset: None,
+        })
+        .collect::<Vec<_>>();
 
-    let mut embeddings = Vec::new();
-    for file in stale_files {
-        let source = openai::EmbeddingSource { filepath: file, subset: None };
-        embeddings.push(openai::embed(source)?);
+    let embeddings = openai::embed(&stale_sources)?;
+    let blocks = embeddings.chunks(1024);
+    for (i, block) in blocks.enumerate() {
+        let filename = format!("{}", i);
+        let embedding_block = EmbeddingBlock {
+            block: i as u64,
+            embeddings: block.to_vec(),
+        };
+
+        embedding_block.to_file(&filename)?;
     }
+
+    Ok(())
+}
+
+pub fn test_block(block: u64) -> Result<(), std::io::Error> {
+    let filename = format!("{}", block);
+    let embedding_block = EmbeddingBlock::from_file(&filename)?;
+    for embedding in embedding_block.embeddings.iter() {
+        info!("{:?}", embedding.source_file);
+    }
+
+    info!("{:?}", embedding_block.embeddings[0]);
 
     Ok(())
 }

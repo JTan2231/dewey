@@ -1,6 +1,6 @@
-/*mod btree;
-mod dbio;*/
 mod config;
+mod dbio;
+mod hnsw;
 mod ledger;
 mod logger;
 mod openai;
@@ -36,17 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if flags.sync {
         ledger::sync_ledger_config()?;
     } else {
-        let stale_files = ledger::get_stale_files();
-        let stale_sources = stale_files
-            .iter()
-            .map(|f| openai::EmbeddingSource {
-                filepath: f.clone(),
-                subset: None,
-            })
-            .collect::<Vec<_>>();
-
-        let embeddings = openai::embed(&stale_sources)?;
-        info!("Embeddings: {}", embeddings.len());
+        let hnsw = hnsw::HNSW::new(0);
+        hnsw.print_graph();
     }
 
     Ok(())

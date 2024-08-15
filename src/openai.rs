@@ -5,6 +5,8 @@ use std::net::TcpStream;
 use crate::logger::Logger;
 use crate::{error, info};
 
+pub const EMBED_DIM: usize = 1536;
+
 #[derive(Debug)]
 struct RequestParams {
     host: String,
@@ -59,7 +61,7 @@ impl EmbeddingSource {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Embedding {
     pub source_file: EmbeddingSource,
     pub data: [f32; 1536],
@@ -89,7 +91,21 @@ impl Embedding {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        Vec::new()
+        let mut bytes = Vec::new();
+
+        let source_bytes = self.source_file.to_bytes();
+        let data_bytes = self
+            .data
+            .iter()
+            .map(|f| f.to_be_bytes())
+            .collect::<Vec<_>>()
+            .concat();
+
+        bytes.extend_from_slice(&(source_bytes.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&source_bytes);
+        bytes.extend_from_slice(&data_bytes);
+
+        bytes
     }
 }
 
@@ -119,6 +135,7 @@ fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
 
     Ok(contents)
 }
+
 pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::Error> {
     let params = RequestParams {
         host: "api.openai.com".to_string(),
@@ -206,8 +223,6 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
             json_string.trim()
         );
 
-        info!("Request: {}", request);
-
         stream.write_all(request.as_bytes())?;
         stream.flush()?;
 
@@ -222,8 +237,6 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
 
             reader.read_line(&mut buffer)?;
             reader.read_line(&mut buffer)?;
-
-            info!("Buffer: {}", buffer);
 
             if buffer.is_empty() || buffer.contains("\r\n\r\n") {
                 break;
