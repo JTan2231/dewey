@@ -13,16 +13,16 @@ const WHITELIST: &[&str] = &[
     "vb", "bas", "erl", "hrl", "ada", "adb", "ads", "clj", "cljs", "cljc", "fs", "fsx", "cob",
     "cbl", "pas", "pp", "pro", "scm", "ss", "tcl", "v", "vh", "vhd", "vhdl", "xml", "md",
     "markdown", "ipynb", "ps1", "psm1", "psd1", "bat", "cmd", "elm", "ex", "exs", "ml", "mli",
-    "mat", "sql",
+    "mat", "sql", "txt",
 ];
 
 #[derive(Debug)]
-struct LedgerEntry {
-    filepath: String,
-    hash: String,
+pub struct LedgerEntry {
+    pub filepath: String,
+    pub hash: String,
 }
 
-fn read_ledger() -> Vec<LedgerEntry> {
+pub fn read_ledger() -> Vec<LedgerEntry> {
     let ledger_path = crate::config::get_local_dir().join("ledger");
     let ledger_file = std::fs::File::open(&ledger_path).expect("Failed to open ledger file");
 
@@ -51,19 +51,17 @@ fn read_ledger() -> Vec<LedgerEntry> {
 }
 
 // returns a list of files whose hashes are out of date with file contents
-pub fn get_stale_files() -> Vec<String> {
+pub fn get_stale_files() -> Result<Vec<String>, std::io::Error> {
     let ledger = read_ledger();
     let mut stale_files = Vec::new();
     for entry in ledger.iter() {
-        let hash = get_hash(&entry.filepath);
-        if true
-        /*hash != entry.hash*/
-        {
+        let hash = get_hash(&entry.filepath)?;
+        if hash != entry.hash {
             stale_files.push(entry.filepath.clone());
         }
     }
 
-    stale_files
+    Ok(stale_files)
 }
 
 fn is_whitelisted(path: &str) -> bool {
@@ -76,15 +74,15 @@ fn is_whitelisted(path: &str) -> bool {
     false
 }
 
-fn get_hash(filepath: &String) -> String {
-    let content = std::fs::read(filepath).expect("Failed to read file");
+fn get_hash(filepath: &String) -> Result<String, std::io::Error> {
+    let content = std::fs::read(filepath)?;
     let mut hasher = Sha256::new();
     Update::update(&mut hasher, &content);
-    hasher
+    Ok(hasher
         .finalize()
         .iter()
         .map(|b| format!("{:02x}", b))
-        .collect::<String>()
+        .collect::<String>())
 }
 
 // current functionality is that it uses .gitignore files
@@ -94,6 +92,9 @@ fn get_hash(filepath: &String) -> String {
 // this should probably be expanded in the future
 //
 // this could also probably be optimized
+//
+// this function rebuilds the `~/.local/dewey/ledger` file
+// according to what's in `~/.config/dewey/ledger`
 pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = crate::config::get_config_dir();
     let config_ledger_path = config_path.join("ledger");
@@ -113,7 +114,6 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         .map(|line| line.to_string())
         .collect::<Vec<_>>();
 
-    let mut gitignores = Vec::new();
     let mut config_entries = Vec::new();
     for mut entry in config_ledger {
         let path = std::path::Path::new(&entry);
@@ -121,101 +121,90 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
             entry.push_str("/**/*");
         }
 
-        for file in glob::glob(&entry).expect("Failed to read glob pattern") {
-            let file = file?;
-            if is_whitelisted(file.to_str().unwrap()) {
-                config_entries.push(file.to_string_lossy().to_string());
-            }
+        info!("searching for files in {}", entry);
 
+        let directory = glob::glob(&entry)
+            .expect("Failed to read glob pattern")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        // there has to be a better way of dealing with go pkg directories than this
+        let mut gitignore_globs = vec!["pkg/mod/**/*".to_string()];
+        for file in directory.iter() {
             if file.ends_with(".gitignore") {
-                gitignores.push(file.to_string_lossy().to_string());
-            }
-        }
-    }
+                let gitignore = file.clone();
+                let file = std::fs::File::open(&gitignore)?;
+                let reader = std::io::BufReader::new(file);
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.starts_with("#") || line.is_empty() {
+                        continue;
+                    }
 
-    let mut gitignore_globs = Vec::new();
-    for gitignore in gitignores {
-        let file = std::fs::File::open(&gitignore)?;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines() {
-            let line = line?;
-            if line.starts_with("#") || line.is_empty() {
-                continue;
-            }
+                    if line.starts_with("!") {
+                        continue;
+                    }
 
-            if line.starts_with("!") {
-                continue;
-            }
+                    let line = match line.strip_prefix("/") {
+                        Some(line) => line,
+                        None => line.as_str(),
+                    };
 
-            let line = match line.strip_prefix("/") {
-                Some(line) => line,
-                None => line.as_str(),
-            };
+                    let full_path = std::path::Path::new(&gitignore)
+                        .parent()
+                        .unwrap()
+                        .join(line);
 
-            let full_path = std::path::Path::new(&gitignore)
-                .parent()
-                .unwrap()
-                .join(line);
-
-            let full_path = match full_path.is_dir() {
-                true => format!("{}/**/*", full_path.to_string_lossy()),
-                false => full_path.to_string_lossy().to_string(),
-            };
-            gitignore_globs.push(full_path);
-        }
-    }
-
-    match std::env::var("GOPATH") {
-        Ok(_) => {
-            gitignore_globs.push("pkg/**/*".to_string());
-        }
-        Err(_) => {
-            let home = crate::config::get_home_dir();
-            gitignore_globs.push(format!("{}/go/pkg/**/*", home.to_string_lossy()));
-        }
-    }
-
-    let mut ignored_count = 0;
-    config_entries = config_entries
-        .into_iter()
-        .filter(|entry| {
-            for glob in gitignore_globs.iter() {
-                if glob::Pattern::new(glob).unwrap().matches(entry) {
-                    ignored_count += 1;
-                    return false;
+                    let full_path = match full_path.is_dir() {
+                        true => format!("{}/**/*", full_path.to_string_lossy()),
+                        false => full_path.to_string_lossy().to_string(),
+                    };
+                    gitignore_globs.push(full_path);
                 }
             }
-            true
-        })
-        .collect();
-
-    let mut local_ledger = read_ledger();
-
-    // n^2 lol
-    let mut new_entries = Vec::new();
-    for entry in config_entries.iter() {
-        if !local_ledger.iter().any(|e| e.filepath == *entry) {
-            new_entries.push(entry);
         }
+
+        let mut kept = 0;
+        config_entries.extend(
+            directory
+                .iter()
+                .filter(|f| {
+                    for glob in gitignore_globs.iter() {
+                        if glob::Pattern::new(glob)
+                            .unwrap()
+                            .matches(f.to_str().unwrap())
+                            || f.to_str().unwrap().contains("pkg/mod")
+                        {
+                            return false;
+                        }
+                    }
+
+                    if is_whitelisted(f.to_str().unwrap()) {
+                        kept += 1;
+                        return true;
+                    } else {
+                        return false;
+                    }
+                })
+                .map(|f| f.to_string_lossy().to_string()),
+        );
+
+        info!("Kept {} files from {}", kept, entry);
+        println!("Kept {} files from {}", kept, entry);
     }
 
-    info!("Adding {} new entries to ledger", new_entries.len());
-    info!("Ignoring {} entries", ignored_count);
-    for new_entry in new_entries {
-        info!("Adding new entry to ledger: {}", new_entry);
-        let entry = LedgerEntry {
-            filepath: new_entry.to_string(),
-            hash: "0".to_string(),
-        };
+    info!("{} config entries", config_entries.len());
 
-        local_ledger.push(entry);
-    }
+    let new_ledger = config_entries
+        .into_iter()
+        .map(|s| LedgerEntry {
+            filepath: s.clone(),
+            hash: get_hash(&s).unwrap(),
+        })
+        .collect::<Vec<_>>();
 
-    for entry in local_ledger.iter_mut() {
-        entry.hash = get_hash(&entry.filepath);
-    }
-
-    info!("Final ledger size: {}", local_ledger.len());
+    info!("New ledger size: {}", new_ledger.len());
+    println!("New ledger size: {}", new_ledger.len());
 
     match std::fs::OpenOptions::new()
         .write(true)
@@ -223,7 +212,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         .open(crate::config::get_local_dir().join("ledger"))
     {
         Ok(mut file) => {
-            for entry in local_ledger {
+            for entry in new_ledger {
                 writeln!(file, "{} {}", entry.filepath, entry.hash)?;
             }
         }

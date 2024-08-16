@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{BufRead, Read, Write};
 use std::net::TcpStream;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::logger::Logger;
 use crate::{error, info};
@@ -118,14 +119,14 @@ fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
         }
     };
 
-    let mut contents = String::new();
-    match file.read_to_string(&mut contents) {
-        Ok(_) => (),
+    let mut buffer = Vec::new();
+    let contents = match file.read_to_end(&mut buffer) {
+        Ok(_) => String::from_utf8_lossy(&buffer).to_string(),
         Err(e) => {
-            error!("Failed to read from file: {:?}", e);
+            error!("Failed to read from file {}: {:?}", source.filepath, e);
             return Err(e);
         }
-    }
+    };
 
     // TODO: we can easily get away without loading the entire file into memory
     let contents = match source.subset {
@@ -155,13 +156,12 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
     let mut split_len = 0;
     for source in sources {
         let source_contents = read_source(&source)?;
-        let mut contents_split = Vec::new();
-        let mut offset = 0;
-        while offset < source_contents.len() {
-            let end = std::cmp::min(offset + TOKEN_LIMIT, source_contents.len());
-            contents_split.push(source_contents[offset..end].to_string());
-            offset = end;
-        }
+        let contents_split = source_contents
+            .graphemes(true)
+            .collect::<Vec<&str>>()
+            .chunks(TOKEN_LIMIT)
+            .map(|chunk| chunk.join("").to_string())
+            .collect::<Vec<String>>();
 
         for contents in contents_split {
             if contents.len() + split_len >= TOKEN_LIMIT {
@@ -226,7 +226,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
         stream.write_all(request.as_bytes())?;
         stream.flush()?;
 
-        info!("Sent request to OpenAI API");
+        info!("Sent request of size {} to OpenAI API", json_string.len());
 
         let mut reader = std::io::BufReader::new(&mut stream);
 
@@ -283,7 +283,17 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
         info!("Parsed JSON response");
 
         let response_json: serde_json::Value = response_json.unwrap();
-        let data = response_json["data"].as_array().unwrap();
+        let data = match response_json["data"].as_array() {
+            Some(data) => data,
+            _ => {
+                error!("Failed to parse data from JSON: {:?}", response_json);
+                error!("Request: {}", request);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Failed to parse data from JSON",
+                ));
+            }
+        };
 
         for (i, datum) in data.iter().enumerate() {
             let mut embedding = Embedding {

@@ -155,15 +155,26 @@ fn read_index() -> Result<Vec<IndexedItem>, std::io::Error> {
 // synchronizes the index with the current ledger
 // TODO: ledgers need to include subsets of files
 //       we also need a proper tokenizer
-pub fn sync_index() -> Result<(), std::io::Error> {
-    let stale_files = crate::ledger::get_stale_files();
-    let stale_sources = stale_files
-        .iter()
-        .map(|f| openai::EmbeddingSource {
-            filepath: f.clone(),
-            subset: None,
-        })
-        .collect::<Vec<_>>();
+pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
+    let stale_sources = match full_embed {
+        true => crate::ledger::read_ledger()
+            .into_iter()
+            .map(|le| openai::EmbeddingSource {
+                filepath: le.filepath.clone(),
+                subset: None,
+            })
+            .collect::<Vec<_>>(),
+        false => {
+            let stale_files = crate::ledger::get_stale_files()?;
+            stale_files
+                .iter()
+                .map(|f| openai::EmbeddingSource {
+                    filepath: f.clone(),
+                    subset: None,
+                })
+                .collect::<Vec<_>>()
+        }
+    };
 
     let embeddings = openai::embed(&stale_sources)?;
     let blocks = embeddings.chunks(1024);

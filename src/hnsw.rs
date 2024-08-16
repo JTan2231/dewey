@@ -1,18 +1,28 @@
 use crate::dbio::EmbeddingBlock;
-use crate::info;
-use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
 
 use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
 
-fn dot(a: &Embedding, b: &Embedding) -> f32 {
+pub fn dot(a: &Embedding, b: &Embedding) -> f32 {
     let mut sum = 0.;
     for i in 0..EMBED_DIM {
         sum += a.data[i] * b.data[i];
     }
 
     sum
+}
+
+fn normalize(embedding: &mut Embedding) {
+    let mut sum = 0.;
+    for i in 0..EMBED_DIM {
+        sum += embedding.data[i] * embedding.data[i];
+    }
+
+    let sum = sum.sqrt();
+    for i in 0..EMBED_DIM {
+        embedding.data[i] /= sum;
+    }
 }
 
 type Graph = HashMap<u32, Vec<(u32, f32)>>;
@@ -32,7 +42,10 @@ impl HNSW {
         let embeddings = block
             .embeddings
             .into_iter()
-            .map(Box::new)
+            .map(|mut embedding| {
+                normalize(&mut embedding);
+                Box::new(embedding)
+            })
             .collect::<Vec<_>>();
 
         let n = embeddings.len();
@@ -60,10 +73,8 @@ impl HNSW {
         let mut layers = vec![HashMap::new(); l as usize];
         for i in 0..n {
             let prob = rng.gen::<f32>();
-            info!("node {} prob {}", i, prob);
             for j in (0..l).rev() {
                 let j = j as usize;
-                info!("layer {} probablity {}", j, thresholds[j]);
                 // inserting the node into layer j
                 // on insertion, form connections between the new node
                 //               and the closest m neighbors in the layer
@@ -83,7 +94,7 @@ impl HNSW {
                                 .map(|&node| {
                                     (
                                         node,
-                                        dot(
+                                        1.0 - dot(
                                             embeddings[i as usize].as_ref(),
                                             embeddings[node as usize].as_ref(),
                                         ),
@@ -152,11 +163,68 @@ impl HNSW {
         }
     }
 
-    pub fn query(&self, query: &Embedding, k: usize, ef: usize) -> Vec<Box<Embedding>> {
-        let mut top_k = Vec::new();
-        let mut current = self.layers[0].keys().next().unwrap();
+    pub fn query(&self, query: &Embedding, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
+        if ef < k {
+            panic!("ef must be greater than k");
+        }
 
+        let mut visited = vec![false; self.nodes.len()];
+        // frankly just a stupid way of using this instead of a min heap
+        // but rust f32 doesn't have Eq so i don't know how to work with it
+        let mut top_k: Vec<(u32, f32)> = Vec::new();
+
+        let mut count = 0;
+        let mut current = *self.layers[0].keys().next().unwrap();
+        for layer in self.layers.iter() {
+            let mut stack = Vec::new();
+            stack.push(current);
+
+            while !stack.is_empty() {
+                current = stack.pop().unwrap();
+                let mut neighbors = layer
+                    .get(&current)
+                    .unwrap()
+                    .clone()
+                    .into_iter()
+                    .map(|(n, _)| (n, 1.0 - dot(query, self.nodes[n as usize].as_ref())))
+                    .collect::<Vec<_>>();
+
+                neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                for (neighbor, distance) in neighbors {
+                    let neighbor = neighbor as usize;
+                    if !visited[neighbor] && count < ef {
+                        top_k.push((neighbor as u32, distance));
+
+                        stack.push(neighbor as u32);
+                        visited[neighbor] = true;
+                        count += 1;
+                    }
+
+                    if top_k.len() >= k {
+                        top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                        while top_k.len() >= k {
+                            top_k.pop();
+                        }
+                    }
+
+                    if count >= ef {
+                        return top_k
+                            .into_iter()
+                            .map(|(node, distance)| (self.nodes[node as usize].clone(), distance))
+                            .collect::<Vec<_>>();
+                    }
+                }
+            }
+
+            top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            current = top_k.first().unwrap().0;
+        }
+
+        top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         top_k
+            .into_iter()
+            .map(|(node, distance)| (self.nodes[node as usize].clone(), distance))
+            .collect::<Vec<_>>()
     }
 
     pub fn print_graph(&self) {
@@ -166,7 +234,7 @@ impl HNSW {
                 println!(
                     "  Node {}: {:?}",
                     node,
-                    neighbors.iter().map(|(n, d)| n).collect::<Vec<_>>()
+                    neighbors.iter().map(|(n, _)| n).collect::<Vec<_>>()
                 );
             }
         }
