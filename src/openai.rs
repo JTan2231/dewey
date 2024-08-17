@@ -1,6 +1,7 @@
+use native_tls::TlsStream;
 use std::env;
 use std::io::{BufRead, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::logger::Logger;
@@ -137,6 +138,31 @@ fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
     Ok(contents)
 }
 
+fn read_to_buffer(
+    reader: &mut std::io::BufReader<&mut TlsStream<TcpStream>>,
+    buffer: &mut String,
+) -> Result<bool, std::io::Error> {
+    match reader.read_line(buffer) {
+        Ok(0) => {
+            error!("Failed to read from OpenAI stream");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Failed to read from OpenAI stream",
+            ));
+        }
+        Ok(_) => Ok(true),
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                error!("Read timeout from OpenAI stream");
+                return Ok(false);
+            }
+
+            error!("Failed to read from OpenAI stream: {:?}", e);
+            return Err(e);
+        }
+    }
+}
+
 pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::Error> {
     let params = RequestParams {
         host: "api.openai.com".to_string(),
@@ -189,123 +215,195 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
     }
 
     let mut embeddings = Vec::new();
-    for batch in batches {
-        let stream = TcpStream::connect((params.host.clone(), params.port))?;
+    for (i, batch) in batches.iter().enumerate() {
+        info!("Batch {} of {} sources", i + 1, batches.len());
+        let success: Result<(), std::io::Error> = {
+            let duration = std::time::Duration::from_secs(5);
+            let address = (params.host.clone(), params.port)
+                .to_socket_addrs()?
+                .next()
+                .ok_or_else(|| {
+                    error!(
+                        "Failed to resolve address {:?}",
+                        (params.host.clone(), params.port)
+                    );
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Failed to resolve address",
+                    )
+                })?;
 
-        let connector = native_tls::TlsConnector::new().expect("Failed to create TLS connector");
-        let mut stream = connector
-            .connect(&params.host, stream)
-            .expect("Failed to establish TLS connection");
-
-        info!("Connected to OpenAI API");
-
-        let body = serde_json::json!({
-            "model": params.model,
-            "input": batch.iter().map(|pair| pair.1.clone()).collect::<Vec<String>>(),
-        });
-        let json = serde_json::json!(body);
-        let json_string = serde_json::to_string(&json)?;
-
-        let auth_string = "Authorization: Bearer ".to_string() + &params.authorization_token;
-
-        let request = format!(
-            "POST {} HTTP/1.1\r\n\
-            Host: {}\r\n\
-            Content-Type: application/json\r\n\
-            Content-Length: {}\r\n\
-            Accept: */*\r\n\
-            {}\r\n\r\n\
-            {}",
-            params.path,
-            params.host,
-            json_string.len(),
-            auth_string,
-            json_string.trim()
-        );
-
-        stream.write_all(request.as_bytes())?;
-        stream.flush()?;
-
-        info!("Sent request of size {} to OpenAI API", json_string.len());
-
-        let mut reader = std::io::BufReader::new(&mut stream);
-
-        let mut headers = String::new();
-        let mut content_length = None;
-        loop {
-            let mut buffer = String::new();
-
-            reader.read_line(&mut buffer)?;
-            reader.read_line(&mut buffer)?;
-
-            if buffer.is_empty() || buffer.contains("\r\n\r\n") {
-                break;
-            }
-
-            if buffer.to_lowercase().contains("content-length:") {
-                content_length = Some(
-                    buffer
-                        .split_whitespace()
-                        .last()
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap(),
-                );
-            }
-
-            headers.push_str(&buffer);
-        }
-
-        info!("headers: {:?}", headers);
-
-        let mut body = String::new();
-        match content_length {
-            Some(content_length) => {
-                reader
-                    .take(content_length as u64)
-                    .read_to_string(&mut body)?;
-            }
-            _ => {
-                panic!("Content-Length header not found");
-            }
-        }
-
-        let response_json = serde_json::from_str(&body);
-
-        if response_json.is_err() {
-            error!("Failed to parse JSON: {}", body);
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Failed to parse JSON",
-            ));
-        }
-
-        info!("Parsed JSON response");
-
-        let response_json: serde_json::Value = response_json.unwrap();
-        let data = match response_json["data"].as_array() {
-            Some(data) => data,
-            _ => {
-                error!("Failed to parse data from JSON: {:?}", response_json);
-                error!("Request: {}", request);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Failed to parse data from JSON",
-                ));
-            }
-        };
-
-        for (i, datum) in data.iter().enumerate() {
-            let mut embedding = Embedding {
-                data: [0.0; 1536],
-                source_file: batch[i].0.clone(),
+            let stream = match TcpStream::connect_timeout(&address, duration) {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to connect to OpenAI API: {:?}", e);
+                    return Err(e);
+                }
             };
 
-            for (i, value) in datum["embedding"].as_array().unwrap().iter().enumerate() {
-                embedding.data[i] = value.as_f64().unwrap() as f32;
+            match stream.set_read_timeout(Some(duration)) {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to set read timeout: {:?}", e);
+                    return Err(e);
+                }
             }
 
-            embeddings.push(embedding);
+            match stream.set_write_timeout(Some(duration)) {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to set write timeout: {:?}", e);
+                    return Err(e);
+                }
+            }
+
+            let connector =
+                native_tls::TlsConnector::new().expect("Failed to create TLS connector");
+            let mut stream = connector
+                .connect(&params.host, stream)
+                .expect("Failed to establish TLS connection");
+
+            info!("Connected to OpenAI API");
+
+            let body = serde_json::json!({
+                "model": params.model,
+                "input": batch.iter().map(|pair| pair.1.clone()).collect::<Vec<String>>(),
+            });
+            let json = serde_json::json!(body);
+            let json_string = serde_json::to_string(&json)?;
+
+            let auth_string = "Authorization: Bearer ".to_string() + &params.authorization_token;
+
+            let request = format!(
+                "POST {} HTTP/1.1\r\n\
+                Host: {}\r\n\
+                Content-Type: application/json\r\n\
+                Content-Length: {}\r\n\
+                Accept: */*\r\n\
+                {}\r\n\r\n\
+                {}",
+                params.path,
+                params.host,
+                json_string.len(),
+                auth_string,
+                json_string.trim()
+            );
+
+            match stream.write_all(request.as_bytes()) {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to write to OpenAI stream: {:?}", e);
+                    return Err(e);
+                }
+            }
+
+            match stream.flush() {
+                Ok(_) => (),
+                Err(e) => {
+                    error!("Failed to flush OpenAI stream: {:?}", e);
+                    return Err(e);
+                }
+            }
+
+            info!("Sent request of size {} to OpenAI API", json_string.len());
+
+            let mut reader = std::io::BufReader::new(&mut stream);
+
+            let mut headers = String::new();
+            let mut content_length = None;
+            let mut timed_out = false;
+            loop {
+                let mut buffer = String::new();
+
+                if !read_to_buffer(&mut reader, &mut buffer)?
+                    || !read_to_buffer(&mut reader, &mut buffer)?
+                {
+                    timed_out = true;
+                    break;
+                }
+
+                if buffer.is_empty() || buffer.contains("\r\n\r\n") {
+                    break;
+                }
+
+                if buffer.to_lowercase().contains("content-length:") {
+                    content_length = Some(
+                        buffer
+                            .split_whitespace()
+                            .last()
+                            .unwrap()
+                            .parse::<usize>()
+                            .unwrap(),
+                    );
+                }
+
+                headers.push_str(&buffer);
+            }
+
+            if timed_out {
+                continue;
+            }
+
+            let mut body = String::new();
+            match content_length {
+                Some(content_length) => {
+                    reader
+                        .take(content_length as u64)
+                        .read_to_string(&mut body)?;
+                }
+                _ => {
+                    panic!("Content-Length header not found");
+                }
+            }
+
+            let response_json = serde_json::from_str(&body);
+
+            if response_json.is_err() {
+                error!("Failed to parse JSON: {}", body);
+                error!("Headers: {}", headers);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Failed to parse JSON",
+                ));
+            }
+
+            info!("Parsed JSON response");
+
+            let response_json: serde_json::Value = response_json.unwrap();
+            let data = match response_json["data"].as_array() {
+                Some(data) => data,
+                _ => {
+                    error!("Failed to parse data from JSON: {:?}", response_json);
+                    error!("Request: {}", request);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Failed to parse data from JSON",
+                    ));
+                }
+            };
+
+            for (i, datum) in data.iter().enumerate() {
+                let mut embedding = Embedding {
+                    data: [0.0; 1536],
+                    source_file: batch[i].0.clone(),
+                };
+
+                for (i, value) in datum["embedding"].as_array().unwrap().iter().enumerate() {
+                    embedding.data[i] = value.as_f64().unwrap() as f32;
+                }
+
+                embeddings.push(embedding);
+            }
+
+            Ok(())
+        };
+
+        match success {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Failed to embed batch {}: {:?}", batch.len(), e);
+                return Err(e);
+            }
         }
     }
 

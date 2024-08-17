@@ -1,8 +1,10 @@
-use crate::openai;
 use std::io::{Read, Write};
 
+use crate::config::get_data_dir;
+use crate::hnsw::normalize;
 use crate::info;
 use crate::logger::Logger;
+use crate::openai::{embed, Embedding, EmbeddingSource};
 
 struct IndexedItem {
     filename: String,
@@ -56,21 +58,11 @@ impl IndexedItem {
 // - n bytes: Embedding
 pub struct EmbeddingBlock {
     block: u64,
-    pub embeddings: Vec<openai::Embedding>,
+    pub embeddings: Vec<Embedding>,
 }
 
 impl EmbeddingBlock {
-    pub fn from_file(filename: &str) -> Result<Self, std::io::Error> {
-        let block = match filename.parse::<u64>() {
-            Ok(n) => n,
-            Err(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Malformed filename, expected u64",
-                ))
-            }
-        };
-
+    pub fn from_file(filename: &str, block: u64) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -98,9 +90,11 @@ impl EmbeddingBlock {
             };
 
             let embedding_bytes = &bytes[start..end];
-            let embedding = openai::Embedding::from_bytes(embedding_bytes);
+            let embedding = Embedding::from_bytes(embedding_bytes);
             embeddings.push(embedding);
         }
+
+        info!("loaded block {} from {}", block, filename);
 
         Ok(Self { block, embeddings })
     }
@@ -121,8 +115,6 @@ impl EmbeddingBlock {
             .iter()
             .map(|e| e.to_bytes())
             .collect::<Vec<_>>();
-
-        info!("{:?}", embedding_bytes);
 
         let mut offsets = Vec::new();
         let mut offset = u64_size + self.embeddings.len() * u64_size;
@@ -159,7 +151,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     let stale_sources = match full_embed {
         true => crate::ledger::read_ledger()
             .into_iter()
-            .map(|le| openai::EmbeddingSource {
+            .map(|le| EmbeddingSource {
                 filepath: le.filepath.clone(),
                 subset: None,
             })
@@ -168,7 +160,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
             let stale_files = crate::ledger::get_stale_files()?;
             stale_files
                 .iter()
-                .map(|f| openai::EmbeddingSource {
+                .map(|f| EmbeddingSource {
                     filepath: f.clone(),
                     subset: None,
                 })
@@ -176,7 +168,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         }
     };
 
-    let embeddings = openai::embed(&stale_sources)?;
+    let embeddings = embed(&stale_sources)?;
     let blocks = embeddings.chunks(1024);
     for (i, block) in blocks.enumerate() {
         let filename = format!("{}", i);
@@ -191,14 +183,47 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-pub fn test_block(block: u64) -> Result<(), std::io::Error> {
-    let filename = format!("{}", block);
-    let embedding_block = EmbeddingBlock::from_file(&filename)?;
-    for embedding in embedding_block.embeddings.iter() {
-        info!("{:?}", embedding.source_file);
+pub fn get_blocks() -> Result<Vec<Box<Embedding>>, std::io::Error> {
+    let data_dir = get_data_dir();
+    let mut block_numbers = Vec::new();
+    for entry in std::fs::read_dir(data_dir.clone())? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(filename) = path.file_name() {
+                if let Some(filename) = filename.to_str() {
+                    if filename.parse::<u64>().is_ok() {
+                        block_numbers.push(filename.parse::<u64>().unwrap());
+                    }
+                }
+            }
+        }
     }
 
-    info!("{:?}", embedding_block.embeddings[0]);
+    let mut embeddings = Vec::new();
+    for block_number in block_numbers {
+        let block = match EmbeddingBlock::from_file(
+            &format!("{}/{}", data_dir.to_str().unwrap(), block_number),
+            block_number,
+        ) {
+            Ok(block) => block,
+            Err(e) => {
+                eprintln!("Error reading embedding block {}: {}", block_number, e);
+                return Err(e);
+            }
+        };
 
-    Ok(())
+        embeddings.extend(
+            block
+                .embeddings
+                .into_iter()
+                .map(|mut embedding| {
+                    normalize(&mut embedding);
+                    Box::new(embedding)
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    Ok(embeddings)
 }

@@ -1,8 +1,10 @@
-use crate::dbio::EmbeddingBlock;
-use crate::openai::{Embedding, EMBED_DIM};
-
 use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
+
+use crate::dbio::get_blocks;
+use crate::info;
+use crate::logger::Logger;
+use crate::openai::{Embedding, EMBED_DIM};
 
 pub fn dot(a: &Embedding, b: &Embedding) -> f32 {
     let mut sum = 0.;
@@ -13,7 +15,7 @@ pub fn dot(a: &Embedding, b: &Embedding) -> f32 {
     sum
 }
 
-fn normalize(embedding: &mut Embedding) {
+pub fn normalize(embedding: &mut Embedding) {
     let mut sum = 0.;
     for i in 0..EMBED_DIM {
         sum += embedding.data[i] * embedding.data[i];
@@ -35,18 +37,12 @@ pub struct HNSW {
 }
 
 impl HNSW {
-    pub fn new(block_number: u64) -> Self {
+    // please god optimize this
+    // like a 10 minute runtime to build the index on 9112 embeddings
+    pub fn new() -> Result<Self, std::io::Error> {
         // TODO: boxing here instead of when they're loaded from file is gross
         //       and can probably be more efficient
-        let block = EmbeddingBlock::from_file(&block_number.to_string()).unwrap();
-        let embeddings = block
-            .embeddings
-            .into_iter()
-            .map(|mut embedding| {
-                normalize(&mut embedding);
-                Box::new(embedding)
-            })
-            .collect::<Vec<_>>();
+        let embeddings = get_blocks()?;
 
         let n = embeddings.len();
         let m = n.ilog2();
@@ -72,6 +68,10 @@ impl HNSW {
         let mut rng = thread_rng();
         let mut layers = vec![HashMap::new(); l as usize];
         for i in 0..n {
+            if i % (n / 10) == 0 {
+                info!("Building HNSW: {}/{}", i, n);
+            }
+
             let prob = rng.gen::<f32>();
             for j in (0..l).rev() {
                 let j = j as usize;
@@ -157,10 +157,10 @@ impl HNSW {
             }
         }
 
-        Self {
+        Ok(Self {
             nodes: embeddings,
             layers,
-        }
+        })
     }
 
     pub fn query(&self, query: &Embedding, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
