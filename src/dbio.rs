@@ -138,18 +138,12 @@ impl EmbeddingBlock {
     }
 }
 
-fn read_index() -> Result<Vec<IndexedItem>, std::io::Error> {
-    let items = Vec::new();
-
-    Ok(items)
-}
-
 // synchronizes the index with the current ledger
 // TODO: ledgers need to include subsets of files
 //       we also need a proper tokenizer
 pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     let stale_sources = match full_embed {
-        true => crate::ledger::read_ledger()
+        true => crate::ledger::read_ledger()?
             .into_iter()
             .map(|le| EmbeddingSource {
                 filepath: le.filepath.clone(),
@@ -183,7 +177,43 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-pub fn get_blocks() -> Result<Vec<Box<Embedding>>, std::io::Error> {
+// filenames should be formatted `/whatever/directories/.../block_number`
+// where `block_number` is a u64
+pub fn read_blocks(filenames: &Vec<String>) -> Result<Vec<Box<Embedding>>, std::io::Error> {
+    let mut embeddings = Vec::new();
+    for filename in filenames {
+        let block_number = match filename.split("/").last().unwrap().parse::<u64>() {
+            Ok(block_number) => block_number,
+            Err(e) => {
+                eprintln!(
+                    "Error parsing block number from filename {}: {}",
+                    filename, e
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid block number",
+                ));
+            }
+        };
+
+        let block = EmbeddingBlock::from_file(filename, block_number)?;
+        embeddings.extend(
+            block
+                .embeddings
+                .into_iter()
+                .map(|mut embedding| {
+                    normalize(&mut embedding);
+                    Box::new(embedding)
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    Ok(embeddings)
+}
+
+// returns boxes of the embeddings and the block files from which they were read
+pub fn get_all_blocks() -> Result<(Vec<Box<Embedding>>, Vec<String>), std::io::Error> {
     let data_dir = get_data_dir();
     let mut block_numbers = Vec::new();
     for entry in std::fs::read_dir(data_dir.clone())? {
@@ -201,11 +231,10 @@ pub fn get_blocks() -> Result<Vec<Box<Embedding>>, std::io::Error> {
     }
 
     let mut embeddings = Vec::new();
+    let mut filenames = Vec::new();
     for block_number in block_numbers {
-        let block = match EmbeddingBlock::from_file(
-            &format!("{}/{}", data_dir.to_str().unwrap(), block_number),
-            block_number,
-        ) {
+        let filename = format!("{}/{}", data_dir.to_str().unwrap(), block_number);
+        let block = match EmbeddingBlock::from_file(&filename.clone(), block_number) {
             Ok(block) => block,
             Err(e) => {
                 eprintln!("Error reading embedding block {}: {}", block_number, e);
@@ -213,6 +242,7 @@ pub fn get_blocks() -> Result<Vec<Box<Embedding>>, std::io::Error> {
             }
         };
 
+        filenames.push(filename);
         embeddings.extend(
             block
                 .embeddings
@@ -225,5 +255,5 @@ pub fn get_blocks() -> Result<Vec<Box<Embedding>>, std::io::Error> {
         );
     }
 
-    Ok(embeddings)
+    Ok((embeddings, filenames))
 }

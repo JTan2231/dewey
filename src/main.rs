@@ -12,6 +12,8 @@ struct Flags {
     sync: bool,
     embed: bool,
     full_embed: bool,
+    reindex: bool,
+    help: bool,
 }
 
 fn parse_flags() -> Flags {
@@ -21,6 +23,8 @@ fn parse_flags() -> Flags {
         sync: false,
         embed: false,
         full_embed: false,
+        reindex: false,
+        help: false,
     };
 
     if args.len() < 1 {
@@ -34,6 +38,8 @@ fn parse_flags() -> Flags {
                     's' => flags.sync = true,
                     'e' => flags.embed = true,
                     'f' => flags.full_embed = true,
+                    'r' => flags.reindex = true,
+                    'h' => flags.help = true,
                     _ => panic!("Unknown flag: {}", c),
                 }
             }
@@ -45,9 +51,14 @@ fn parse_flags() -> Flags {
     flags
 }
 
-// create a new file in ~/.local/dewey/queries
-// named with the current microsecond timestamp
-// containing the user query
+fn man() {
+    println!("Usage: dewey [-sef] [query]");
+    println!("\t-s: sync ledger with config");
+    println!("\t-e: embed stale files");
+    println!("\t-f: force re-embed all files");
+    println!("\t-r: reindex the database");
+}
+
 fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
     let timestamp = chrono::Utc::now().timestamp_micros();
     let path = config::get_local_dir()
@@ -76,6 +87,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let flags = parse_flags();
     let mut no_flags = true;
 
+    if flags.help {
+        man();
+        return Ok(());
+    }
+
     if flags.sync {
         no_flags = false;
         ledger::sync_ledger_config()?;
@@ -84,6 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if flags.embed || flags.full_embed {
         no_flags = false;
         dbio::sync_index(flags.full_embed)?;
+    }
+
+    if flags.reindex {
+        no_flags = false;
+        let index = hnsw::HNSW::new(true)?;
+
+        let data_dir = config::get_data_dir();
+        index.serialize(&data_dir.join("index").to_str().unwrap().to_string())?;
     }
 
     if no_flags {
@@ -95,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let query = flags.query;
 
-        let index = hnsw::HNSW::new()?;
+        let index = hnsw::HNSW::new(false)?;
         user_query(&index, query)?;
     }
 

@@ -1,5 +1,6 @@
 use sha2::digest::Update;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use crate::logger::Logger;
@@ -16,13 +17,25 @@ const WHITELIST: &[&str] = &[
     "mat", "sql", "txt",
 ];
 
+#[derive(Debug, PartialEq)]
+pub enum IndexRuleType {
+    Split,
+    Naive,
+}
+
+#[derive(Debug)]
+pub struct IndexRule {
+    pub rule_type: IndexRuleType,
+    pub value: String,
+}
+
 #[derive(Debug)]
 pub struct LedgerEntry {
     pub filepath: String,
     pub hash: String,
 }
 
-pub fn read_ledger() -> Vec<LedgerEntry> {
+pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
     let ledger_path = crate::config::get_local_dir().join("ledger");
     let ledger_file = std::fs::File::open(&ledger_path).expect("Failed to open ledger file");
 
@@ -47,12 +60,12 @@ pub fn read_ledger() -> Vec<LedgerEntry> {
         line.clear();
     }
 
-    entries
+    Ok(entries)
 }
 
 // returns a list of files whose hashes are out of date with file contents
 pub fn get_stale_files() -> Result<Vec<String>, std::io::Error> {
-    let ledger = read_ledger();
+    let ledger = read_ledger()?;
     let mut stale_files = Vec::new();
     for entry in ledger.iter() {
         let hash = get_hash(&entry.filepath)?;
@@ -85,6 +98,65 @@ fn get_hash(filepath: &String) -> Result<String, std::io::Error> {
         .collect::<String>())
 }
 
+// the rules config is housed in ~/.config/dewey/rules
+// each rule has its own line and is formatted like so:
+//   `extension --rule_type value --rule_type value ...`
+// where:
+//   - `extension` is the file extension to which the rule applies
+//   - `rule_type` is the type of rule to apply
+//   - `value` is the value of the rule
+pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::Error> {
+    let config_path = crate::config::get_config_dir();
+    let config_index_path = config_path.join("rules");
+
+    let file = std::fs::File::open(&config_index_path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut rulesets = HashMap::new();
+    for line in reader.lines() {
+        let line = line?;
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            error!("Ignoring malformed index rule: {}", line);
+            continue;
+        }
+
+        let extension = parts[0].to_string();
+        let mut rule = IndexRule {
+            rule_type: IndexRuleType::Naive,
+            value: "".to_string(),
+        };
+
+        let mut rules = Vec::new();
+        for part in parts.iter().skip(1) {
+            if part.starts_with("--") {
+                match part.to_lowercase().as_str() {
+                    "--split" => rule.rule_type = IndexRuleType::Split,
+                    _ => {
+                        error!("Ignoring unknown rule type: {}", part);
+                    }
+                }
+            } else {
+                rule.value = part.to_string();
+                rule.value = rule
+                    .value
+                    .replace("\"", "")
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
+                    .replace("\\r", "\r");
+                rules.push(rule);
+                rule = IndexRule {
+                    rule_type: IndexRuleType::Naive,
+                    value: "".to_string(),
+                };
+            }
+        }
+
+        rulesets.insert(extension, rules);
+    }
+
+    Ok(rulesets)
+}
+
 // current functionality is that it uses .gitignore files
 // to blacklist files that are under the directories
 // in the ledger config
@@ -95,6 +167,8 @@ fn get_hash(filepath: &String) -> Result<String, std::io::Error> {
 //
 // this function rebuilds the `~/.local/dewey/ledger` file
 // according to what's in `~/.config/dewey/ledger`
+//
+// files in the config ledger can be commented out with `#`
 pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = crate::config::get_config_dir();
     let config_ledger_path = config_path.join("ledger");
@@ -116,6 +190,10 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config_entries = Vec::new();
     for mut entry in config_ledger {
+        if entry.starts_with("#") {
+            continue;
+        }
+
         let path = std::path::Path::new(&entry);
         if path.is_dir() && (!entry.ends_with("*") || !entry.ends_with("**")) {
             entry.push_str("/**/*");

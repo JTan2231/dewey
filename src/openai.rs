@@ -4,6 +4,7 @@ use std::io::{BufRead, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::ledger::{get_indexing_rules, IndexRuleType};
 use crate::logger::Logger;
 use crate::{error, info};
 
@@ -135,6 +136,9 @@ fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
         _ => contents,
     };
 
+    // CRLF -> LF
+    let contents = contents.replace("\r\n", "\n");
+
     Ok(contents)
 }
 
@@ -163,6 +167,161 @@ fn read_to_buffer(
     }
 }
 
+// TODO: a proper tokenizer
+const TOKEN_LIMIT: usize = 8192;
+fn separator_split(
+    source: &EmbeddingSource,
+    separator: &String,
+) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
+    let contents = read_source(&source)?;
+    let chars = contents.graphemes(true).collect::<Vec<&str>>();
+
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut i = 0;
+    while i < chars.len() - separator.len() {
+        let window = chars[i..i + separator.len()].join("");
+        if window == *separator || chunk.len() >= TOKEN_LIMIT {
+            chunks.push((chunk.clone(), (i - chunk.len(), i)));
+            chunk.clear();
+
+            i += separator.len();
+        } else {
+            chunk.push_str(chars[i]);
+            i += chars[i].len();
+        }
+    }
+
+    if !chunk.is_empty() {
+        chunks.push((
+            chunk.clone(),
+            (contents.len() - chunk.len(), contents.len()),
+        ));
+    }
+
+    Ok(chunks)
+}
+
+// this only has a _separator argument so it can be used as a function pointer
+// for either this or `separator_split`
+fn naive_split(
+    source: &EmbeddingSource,
+    _separator: &String,
+) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
+    let source_contents = read_source(&source)?;
+    let chars = source_contents.graphemes(true).collect::<Vec<&str>>();
+
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chunk.len() >= TOKEN_LIMIT {
+            chunks.push((chunk.clone(), (i - chunk.len(), i)));
+            chunk.clear();
+            i += 1;
+        } else {
+            chunk.push_str(chars[i]);
+            i += chars[i].len();
+        }
+    }
+
+    if !chunk.is_empty() {
+        chunks.push((
+            chunk.clone(),
+            (source_contents.len() - chunk.len(), source_contents.len()),
+        ));
+    }
+
+    Ok(chunks)
+}
+
+fn batch_sources(
+    sources: &Vec<EmbeddingSource>,
+) -> Result<Vec<Vec<(EmbeddingSource, String)>>, std::io::Error> {
+    let indexing_rules = get_indexing_rules()?;
+    info!("batching with rules: {:?}", indexing_rules);
+    // API requests need batched up to keep from exceeding token limits
+    let mut batches: Vec<Vec<(EmbeddingSource, String)>> = vec![Vec::new()];
+    for source in sources {
+        let extension = match source.filepath.split(".").last() {
+            Some(extension) => extension,
+            _ => {
+                error!("Failed to get extension from file: {:?}", source.filepath);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Failed to get extension from file",
+                ));
+            }
+        };
+
+        info!("extension: {}", extension);
+        let rules = indexing_rules.get(extension);
+        let mut separator = "".to_string();
+        let split_function: fn(
+            &EmbeddingSource,
+            &String,
+        ) -> Result<Vec<(String, (usize, usize))>, std::io::Error> = match rules {
+            Some(rules) => {
+                let mut found = false;
+                for rule in rules {
+                    match rule.rule_type {
+                        IndexRuleType::Split => {
+                            separator = rule.value.clone();
+                            found = true;
+                        }
+                        _ => (),
+                    }
+                }
+
+                if !found {
+                    info!("Using naive split for extension: {}", extension);
+                    naive_split
+                } else {
+                    info!("Using separator split for extension: {}", extension);
+                    separator_split
+                }
+            }
+            _ => {
+                info!("Using naive split for extension: {}", extension);
+                naive_split
+            }
+        };
+
+        let contents_split = split_function(&source, &separator)?;
+
+        let mut split = batches.last_mut().unwrap();
+        let mut split_len = 0;
+        for (contents, window) in contents_split {
+            if contents.len() + split_len >= TOKEN_LIMIT {
+                batches.push(Vec::new());
+
+                split = batches.last_mut().unwrap();
+                split_len = 0;
+            }
+
+            split_len += contents.len();
+            let new_source = EmbeddingSource {
+                filepath: source.filepath.clone(),
+                subset: Some((window.0 as u64, window.1 as u64)),
+            };
+            split.push((new_source, contents));
+        }
+    }
+
+    batches.retain(|batch| !batch.is_empty());
+
+    info!(
+        "batched {} sources into {} batches",
+        sources.len(),
+        batches.len()
+    );
+
+    info!("batch sample: {:?}", batches[0]);
+    panic!();
+
+    Ok(batches)
+}
+
 pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::Error> {
     let params = RequestParams {
         host: "api.openai.com".to_string(),
@@ -174,46 +333,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
     };
 
     // API requests need batched up to keep from exceeding token limits
-    // TODO: a proper tokenizer
-    const TOKEN_LIMIT: usize = 8192;
-
-    let mut batches: Vec<Vec<(EmbeddingSource, String)>> = vec![Vec::new()];
-    let mut split = batches.last_mut().unwrap();
-    let mut split_len = 0;
-    for source in sources {
-        let source_contents = read_source(&source)?;
-        let contents_split = source_contents
-            .graphemes(true)
-            .collect::<Vec<&str>>()
-            .chunks(TOKEN_LIMIT)
-            .map(|chunk| chunk.join("").to_string())
-            .collect::<Vec<String>>();
-
-        for contents in contents_split {
-            if contents.len() + split_len >= TOKEN_LIMIT {
-                batches.push(Vec::new());
-
-                split = batches.last_mut().unwrap();
-                split_len = 0;
-            }
-
-            split_len += contents.len();
-            split.push((source.clone(), contents));
-        }
-    }
-
-    let mut sizes = Vec::new();
-    for batch in batches.iter() {
-        sizes.push(
-            batch
-                .iter()
-                .map(|pair| pair.1.len())
-                .collect::<Vec<usize>>()
-                .iter()
-                .sum::<usize>(),
-        );
-    }
-
+    let batches = batch_sources(&sources)?;
     let mut embeddings = Vec::new();
     for (i, batch) in batches.iter().enumerate() {
         info!("Batch {} of {} sources", i + 1, batches.len());
@@ -373,6 +493,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
             let data = match response_json["data"].as_array() {
                 Some(data) => data,
                 _ => {
+                    error!("batch: {:?}", batch);
                     error!("Failed to parse data from JSON: {:?}", response_json);
                     error!("Request: {}", request);
                     return Err(std::io::Error::new(

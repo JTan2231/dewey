@@ -1,7 +1,9 @@
 use rand::{thread_rng, Rng};
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 
-use crate::dbio::get_blocks;
+use crate::config::get_data_dir;
+use crate::dbio::{get_all_blocks, read_blocks};
 use crate::info;
 use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
@@ -32,17 +34,27 @@ type Graph = HashMap<u32, Vec<(u32, f32)>>;
 // basic in-memory nearest neighbor index
 // TODO: should we handle huge datasets, beyond what memory can hold?
 pub struct HNSW {
+    embedding_sources: Vec<String>,
     nodes: Vec<Box<Embedding>>,
-    layers: Vec<Graph>,
+    pub layers: Vec<Graph>,
 }
 
 impl HNSW {
     // please god optimize this
-    // like a 10 minute runtime to build the index on 9112 embeddings
-    pub fn new() -> Result<Self, std::io::Error> {
+    // like a 20 minute runtime to build the index on 9112 embeddings
+    pub fn new(reindex: bool) -> Result<Self, std::io::Error> {
         // TODO: boxing here instead of when they're loaded from file is gross
         //       and can probably be more efficient
-        let embeddings = get_blocks()?;
+        if !reindex {
+            info!("loading index from disk");
+            let data_dir = get_data_dir();
+            let hnsw = Self::deserialize(data_dir.join("index").to_string_lossy().to_string())?;
+            return Ok(hnsw);
+        }
+
+        info!("building index from block files");
+
+        let (embeddings, sources) = get_all_blocks()?;
 
         let n = embeddings.len();
         let m = n.ilog2();
@@ -159,6 +171,7 @@ impl HNSW {
 
         Ok(Self {
             nodes: embeddings,
+            embedding_sources: sources,
             layers,
         })
     }
@@ -225,6 +238,124 @@ impl HNSW {
             .into_iter()
             .map(|(node, distance)| (self.nodes[node as usize].clone(), distance))
             .collect::<Vec<_>>()
+    }
+
+    // format:
+    // 4 bytes: number `n` of embedding sources
+    // `n` of the following:
+    //   - 4 bytes: length `s` of the source string
+    //   - `s` bytes: source string
+    // 4 bytes: number `l` of layers
+    // `l` of the following:
+    //   - 4 bytes: index `i` of the layer
+    //   - 4 bytes: number `o` of nodes in the layer
+    //   `o` of the following:
+    //     - 4 bytes: index `v` of the node
+    //     - 4 bytes: number `e` of edges from the node
+    //     `e` of the following:
+    //       - 4 bytes: index `u` of the neighbor
+    //       - 4 bytes: distance `d` to the neighbor
+    pub fn serialize(&self, filepath: &String) -> Result<(), std::io::Error> {
+        info!("serializing index to {}", filepath);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(filepath)?;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(self.embedding_sources.len() as u32).to_be_bytes());
+        for source in self.embedding_sources.iter() {
+            bytes.extend_from_slice(&(source.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(source.as_bytes());
+        }
+
+        bytes.extend_from_slice(&(self.layers.len() as u32).to_be_bytes());
+        for (i, layer) in self.layers.iter().enumerate() {
+            bytes.extend_from_slice(&(i as u32).to_be_bytes());
+            bytes.extend_from_slice(&(layer.len() as u32).to_be_bytes());
+            for (v, neighbors) in layer.iter() {
+                bytes.extend_from_slice(&v.to_be_bytes());
+                bytes.extend_from_slice(&(neighbors.len() as u32).to_be_bytes());
+                for (u, d) in neighbors.iter() {
+                    bytes.extend_from_slice(&u.to_be_bytes());
+                    bytes.extend_from_slice(&d.to_be_bytes());
+                }
+            }
+        }
+
+        file.write_all(&bytes)?;
+
+        info!("finished serializing index");
+
+        Ok(())
+    }
+
+    pub fn deserialize(filepath: String) -> Result<Self, std::io::Error> {
+        info!("deserializing index from {}", filepath);
+        let mut file = std::fs::File::open(filepath)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+
+        let mut offset = 0;
+        let n = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        let mut sources = Vec::new();
+        for _ in 0..n {
+            let s = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+
+            let source = String::from_utf8(bytes[offset..offset + s].to_vec()).unwrap();
+            offset += s;
+
+            sources.push(source);
+        }
+
+        let l = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        let mut layers = Vec::new();
+        for _ in 0..l {
+            //u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+
+            let o = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+
+            let mut layer = HashMap::new();
+            for _ in 0..o {
+                let v = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                offset += 4;
+
+                let e = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                offset += 4;
+
+                let mut neighbors = Vec::new();
+                for _ in 0..e {
+                    let u = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                    offset += 4;
+
+                    let d = f32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                    offset += 4;
+
+                    neighbors.push((u, d));
+                }
+
+                layer.insert(v, neighbors);
+            }
+
+            layers.push(layer);
+        }
+
+        let nodes = read_blocks(&sources)?;
+
+        info!("finished deserializing index");
+
+        Ok(Self {
+            embedding_sources: sources.clone(),
+            nodes,
+            layers,
+        })
     }
 
     pub fn print_graph(&self) {
