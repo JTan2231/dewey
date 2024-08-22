@@ -6,46 +6,6 @@ use crate::info;
 use crate::logger::Logger;
 use crate::openai::{embed, Embedding, EmbeddingSource};
 
-struct IndexedItem {
-    filename: String,
-    block: u64,
-    offset: u64,
-}
-
-impl IndexedItem {
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        bytes.extend_from_slice(&self.filename.len().to_be_bytes());
-        bytes.extend_from_slice(&self.filename.as_bytes());
-        bytes.extend_from_slice(&self.block.to_be_bytes());
-        bytes.extend_from_slice(&self.offset.to_be_bytes());
-
-        bytes
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let filename_len = u64::from_be_bytes(bytes[0..8].try_into().unwrap()) as usize;
-        let filename = String::from_utf8(bytes[8..8 + filename_len].to_vec()).unwrap();
-        let block = u64::from_be_bytes(
-            bytes[8 + filename_len..16 + filename_len]
-                .try_into()
-                .unwrap(),
-        );
-        let offset = u64::from_be_bytes(
-            bytes[16 + filename_len..24 + filename_len]
-                .try_into()
-                .unwrap(),
-        );
-
-        Self {
-            filename,
-            block,
-            offset,
-        }
-    }
-}
-
 // these have a limit of 1024 embeddings each
 // format is:
 // - 8 bytes: number of contained embeddings
@@ -162,7 +122,11 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         }
     };
 
-    let embeddings = embed(&stale_sources)?;
+    let mut embeddings = embed(&stale_sources)?;
+    for (i, e) in embeddings.iter_mut().enumerate() {
+        e.id = i as u64;
+    }
+
     let blocks = embeddings.chunks(1024);
     for (i, block) in blocks.enumerate() {
         let filename = format!("{}", i);

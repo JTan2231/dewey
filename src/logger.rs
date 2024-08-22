@@ -76,3 +76,15 @@ macro_rules! error {
         Logger::error(format!($($arg)*));
     }
 }
+
+#[macro_export]
+macro_rules! printl {
+    (info, $($arg:tt)*) => {
+        println!("{}", format!($($arg)*));
+        Logger::info(format!($($arg)*));
+    };
+    (error, $($arg:tt)*) => {
+        println!("{}", format!($($arg)*));
+        Logger::error(format!($($arg)*));
+    };
+}

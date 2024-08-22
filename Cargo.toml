@@ -3,6 +3,9 @@ name = "dewey"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+simd = []
+
 [dependencies]
 chrono = "0.4.38"
 glob = "0.3.1"

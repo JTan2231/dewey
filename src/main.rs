@@ -5,6 +5,8 @@ mod ledger;
 mod logger;
 mod openai;
 
+use rand::random;
+
 use crate::logger::Logger;
 
 struct Flags {
@@ -52,14 +54,17 @@ fn parse_flags() -> Flags {
 }
 
 fn man() {
-    println!("Usage: dewey [-sef] [query]");
-    println!("\t-s: sync ledger with config");
+    println!("Usage: ./main [-sef] [query]");
+    println!("\t-s: sync ledger config");
     println!("\t-e: embed stale files");
-    println!("\t-f: force re-embed all files");
-    println!("\t-r: reindex the database");
+    println!("\t-f: full embed all files");
+    println!("\t-r: reindex the hnsw index");
+    println!("\t-h: print this help message");
+    println!("\tquery: query to search for");
 }
 
-fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
+// pending HNSW refactor
+/*fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
     let timestamp = chrono::Utc::now().timestamp_micros();
     let path = config::get_local_dir()
         .join("queries")
@@ -72,15 +77,17 @@ fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
         subset: None,
     }])?;
 
-    let result = index.query(&embedding[0], 10, 30);
+    let result = index.query(&embedding[0], 5, 50);
 
     for (e, d) in result {
-        println!("{}: {}", e.source_file.filepath, d);
+        let content = openai::read_source(&e.source_file)?;
+        println!("({}, {}): \n\n{}", e.source_file.filepath, d, content);
+        println!("---------------------");
         info!("{}: {}", e.source_file.filepath, d);
     }
 
     Ok(())
-}
+}*/
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::setup();
@@ -120,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let query = flags.query;
 
         let index = hnsw::HNSW::new(false)?;
-        user_query(&index, query)?;
+        //user_query(&index, query)?;
     }
 
     Ok(())
