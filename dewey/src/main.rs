@@ -4,8 +4,7 @@ mod hnsw;
 mod ledger;
 mod logger;
 mod openai;
-
-use rand::random;
+mod serialization;
 
 use crate::logger::Logger;
 
@@ -16,6 +15,7 @@ struct Flags {
     full_embed: bool,
     reindex: bool,
     help: bool,
+    test: bool,
 }
 
 fn parse_flags() -> Flags {
@@ -27,6 +27,7 @@ fn parse_flags() -> Flags {
         full_embed: false,
         reindex: false,
         help: false,
+        test: false,
     };
 
     if args.len() < 1 {
@@ -42,6 +43,7 @@ fn parse_flags() -> Flags {
                     'f' => flags.full_embed = true,
                     'r' => flags.reindex = true,
                     'h' => flags.help = true,
+                    't' => flags.test = true,
                     _ => panic!("Unknown flag: {}", c),
                 }
             }
@@ -64,7 +66,7 @@ fn man() {
 }
 
 // pending HNSW refactor
-/*fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
+fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
     let timestamp = chrono::Utc::now().timestamp_micros();
     let path = config::get_local_dir()
         .join("queries")
@@ -80,6 +82,7 @@ fn man() {
     let result = index.query(&embedding[0], 5, 50);
 
     for (e, d) in result {
+        printl!(info, "source: {:?}", e.source_file);
         let content = openai::read_source(&e.source_file)?;
         println!("({}, {}): \n\n{}", e.source_file.filepath, d, content);
         println!("---------------------");
@@ -87,12 +90,18 @@ fn man() {
     }
 
     Ok(())
-}*/
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::setup();
     let flags = parse_flags();
     let mut no_flags = true;
+
+    if flags.test {
+        let index = hnsw::HNSW::new(false)?;
+        index.print_graph();
+        return Ok(());
+    }
 
     if flags.help {
         man();
@@ -125,9 +134,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let query = flags.query;
-
         let index = hnsw::HNSW::new(false)?;
-        //user_query(&index, query)?;
+        user_query(&index, query)?;
     }
 
     Ok(())

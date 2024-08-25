@@ -3,10 +3,13 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use serialize_macros::Serialize;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ledger::{get_indexing_rules, IndexRuleType};
 use crate::logger::Logger;
+use crate::serialization::Serialize;
 use crate::{error, info, printl};
 
 pub const EMBED_DIM: usize = 1536;
@@ -20,110 +23,20 @@ struct RequestParams {
     authorization_token: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EmbeddingSource {
     pub filepath: String,
     pub subset: Option<(u64, u64)>,
 }
 
-impl EmbeddingSource {
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let u64_size = std::mem::size_of::<u64>();
-
-        let filepath_len = u64::from_be_bytes(bytes[0..u64_size].try_into().unwrap()) as usize;
-        let filepath =
-            String::from_utf8(bytes[u64_size..u64_size + filepath_len].to_vec()).unwrap();
-        let start = u64::from_be_bytes(
-            bytes[u64_size + filepath_len..u64_size + filepath_len + u64_size]
-                .try_into()
-                .unwrap(),
-        );
-        let end = u64::from_be_bytes(
-            bytes[u64_size + filepath_len + u64_size..u64_size + filepath_len + 2 * u64_size]
-                .try_into()
-                .unwrap(),
-        );
-
-        let subset = match (start, end) {
-            (0, 0) => None,
-            _ => Some((start, end)),
-        };
-
-        Self { filepath, subset }
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let filepath_len = self.filepath.len() as u64;
-
-        bytes.extend_from_slice(&filepath_len.to_be_bytes());
-        bytes.extend_from_slice(&self.filepath.as_bytes());
-        bytes.extend_from_slice(&self.subset.unwrap_or((0, 0)).0.to_be_bytes());
-        bytes.extend_from_slice(&self.subset.unwrap_or((0, 0)).1.to_be_bytes());
-
-        bytes
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Embedding {
     pub id: u64,
     pub source_file: EmbeddingSource,
-    pub data: [f32; 1536],
+    pub data: [f32; EMBED_DIM],
 }
 
-impl Embedding {
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let u64_size = std::mem::size_of::<u64>();
-        let f32_size = std::mem::size_of::<f32>();
-
-        let mut offset = 0;
-        let id = u64::from_be_bytes(bytes[0..u64_size].try_into().unwrap());
-        offset += u64_size;
-
-        let source_size = u64::from_be_bytes(bytes[offset..offset + u64_size].try_into().unwrap());
-        offset += u64_size;
-
-        let source = EmbeddingSource::from_bytes(&bytes[offset..offset + source_size as usize]);
-        offset += source_size as usize;
-
-        let mut data = [0.0; 1536];
-        for (i, value) in bytes[offset..]
-            .chunks(f32_size)
-            .map(|chunk| f32::from_be_bytes(chunk.try_into().unwrap()))
-            .enumerate()
-        {
-            data[i] = value;
-        }
-
-        Self {
-            id,
-            source_file: source,
-            data,
-        }
-    }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        let source_bytes = self.source_file.to_bytes();
-        let data_bytes = self
-            .data
-            .iter()
-            .map(|f| f.to_be_bytes())
-            .collect::<Vec<_>>()
-            .concat();
-
-        bytes.extend_from_slice(&self.id.to_be_bytes());
-        bytes.extend_from_slice(&(source_bytes.len() as u64).to_be_bytes());
-        bytes.extend_from_slice(&source_bytes);
-        bytes.extend_from_slice(&data_bytes);
-
-        bytes
-    }
-}
-
-fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
+pub fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
     let mut file = match std::fs::File::open(&source.filepath) {
         Ok(file) => file,
         Err(e) => {
@@ -477,6 +390,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
                         let response_json = serde_json::from_str(&body);
 
                         if response_json.is_err() {
+                            error!("request: {}", request);
                             error!("Failed to parse JSON: {}", body);
                             error!("Headers: {}", headers.join("\n"));
                             return Err(std::io::Error::new(

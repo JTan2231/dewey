@@ -3,15 +3,19 @@ name = "dewey"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-simd = []
+[build]
+rustflags = ["-Z", "macro-backtrace"]
 
 [dependencies]
 chrono = "0.4.38"
 glob = "0.3.1"
 native-tls = "0.2.12"
+proc-macro2 = "1.0.86"
+quote = "1.0.37"
 rand = "0.8.5"
 serde = "1.0.206"
 serde_json = "1.0.122"
 sha2 = "0.10.8"
+syn = "2.0.76"
 unicode-segmentation = "1.11.0"
+serialize_macros = { path = "../serialize_macros" }

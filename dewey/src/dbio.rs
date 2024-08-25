@@ -1,10 +1,13 @@
 use std::io::{Read, Write};
 
+use serialize_macros::Serialize;
+
 use crate::config::get_data_dir;
 use crate::hnsw::normalize;
-use crate::info;
 use crate::logger::Logger;
 use crate::openai::{embed, Embedding, EmbeddingSource};
+use crate::serialization::Serialize;
+use crate::{info, printl};
 
 // these have a limit of 1024 embeddings each
 // format is:
@@ -16,6 +19,7 @@ use crate::openai::{embed, Embedding, EmbeddingSource};
 // - n bytes: EmbeddingSource
 // - 8 bytes: size of Embedding
 // - n bytes: Embedding
+#[derive(Serialize)]
 pub struct EmbeddingBlock {
     block: u64,
     pub embeddings: Vec<Embedding>,
@@ -27,36 +31,17 @@ impl EmbeddingBlock {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
-        let u64_size = std::mem::size_of::<u64>();
-
-        let num_embeddings = u64::from_be_bytes(bytes[0..u64_size].try_into().unwrap()) as usize;
-        let mut offsets = Vec::new();
-        for i in 0..num_embeddings {
-            let offset = u64::from_be_bytes(
-                bytes[u64_size + i * u64_size..u64_size + (i + 1) * u64_size]
-                    .try_into()
-                    .unwrap(),
-            );
-            offsets.push(offset);
-        }
-
-        let mut embeddings = Vec::new();
-        for i in 0..num_embeddings {
-            let start = offsets[i] as usize;
-            let end = if i == num_embeddings - 1 {
-                bytes.len()
-            } else {
-                offsets[i + 1] as usize
-            };
-
-            let embedding_bytes = &bytes[start..end];
-            let embedding = Embedding::from_bytes(embedding_bytes);
-            embeddings.push(embedding);
-        }
+        info!("Read {} bytes from {}", bytes.len(), filename);
+        let (embed_block, _) = EmbeddingBlock::from_bytes(&bytes, 0)?;
 
         info!("loaded block {} from {}", block, filename);
+        info!(
+            "block: {}, embeddings: {}",
+            embed_block.block,
+            embed_block.embeddings.len()
+        );
 
-        Ok(Self { block, embeddings })
+        Ok(embed_block)
     }
 
     fn to_file(&self, filename: &str) -> Result<(), std::io::Error> {
@@ -65,32 +50,7 @@ impl EmbeddingBlock {
             .write(true)
             .open(filename)?;
 
-        let u64_size = std::mem::size_of::<u64>();
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&(self.embeddings.len() as u64).to_be_bytes());
-
-        let embedding_bytes = self
-            .embeddings
-            .iter()
-            .map(|e| e.to_bytes())
-            .collect::<Vec<_>>();
-
-        let mut offsets = Vec::new();
-        let mut offset = u64_size + self.embeddings.len() * u64_size;
-        for embedding_bytes in embedding_bytes.iter() {
-            offsets.push(offset);
-            offset += embedding_bytes.len();
-        }
-
-        for offset in offsets {
-            bytes.extend_from_slice(&offset.to_be_bytes());
-        }
-
-        for embedding_bytes in embedding_bytes.iter() {
-            bytes.extend_from_slice(&embedding_bytes);
-        }
-
+        let bytes = self.to_bytes();
         info!("Writing {} bytes to {}", bytes.len(), filename);
         file.write_all(&bytes)?;
 
@@ -127,16 +87,38 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         e.id = i as u64;
     }
 
+    let mut directory = Vec::new();
+
+    let data_dir = get_data_dir();
+
     let blocks = embeddings.chunks(1024);
     for (i, block) in blocks.enumerate() {
-        let filename = format!("{}", i);
+        let filename = format!("{}/{}", data_dir.to_str().unwrap(), i);
         let embedding_block = EmbeddingBlock {
             block: i as u64,
             embeddings: block.to_vec(),
         };
 
         embedding_block.to_file(&filename)?;
+
+        for b in block {
+            directory.push((b.id, i));
+        }
     }
+
+    let directory = directory
+        .into_iter()
+        .map(|d| format!("{} {}", d.0, d.1))
+        .collect::<Vec<_>>();
+    let count = directory.len();
+    let directory = directory.join("\n");
+
+    std::fs::write(
+        format!("{}/directory", get_data_dir().to_str().unwrap()),
+        directory,
+    )?;
+
+    printl!(info, "Wrote directory with {} entries", count);
 
     Ok(())
 }
@@ -176,8 +158,14 @@ pub fn read_blocks(filenames: &Vec<String>) -> Result<Vec<Box<Embedding>>, std::
     Ok(embeddings)
 }
 
+pub struct BlockEmbedding {
+    pub block_number: u64,
+    pub embedding: Box<Embedding>,
+    pub source_file: String,
+}
+
 // returns boxes of the embeddings and the block files from which they were read
-pub fn get_all_blocks() -> Result<(Vec<Box<Embedding>>, Vec<String>), std::io::Error> {
+pub fn get_all_blocks() -> Result<Vec<BlockEmbedding>, std::io::Error> {
     let data_dir = get_data_dir();
     let mut block_numbers = Vec::new();
     for entry in std::fs::read_dir(data_dir.clone())? {
@@ -194,8 +182,7 @@ pub fn get_all_blocks() -> Result<(Vec<Box<Embedding>>, Vec<String>), std::io::E
         }
     }
 
-    let mut embeddings = Vec::new();
-    let mut filenames = Vec::new();
+    let mut block_embeddings = Vec::new();
     for block_number in block_numbers {
         let filename = format!("{}/{}", data_dir.to_str().unwrap(), block_number);
         let block = match EmbeddingBlock::from_file(&filename.clone(), block_number) {
@@ -206,18 +193,22 @@ pub fn get_all_blocks() -> Result<(Vec<Box<Embedding>>, Vec<String>), std::io::E
             }
         };
 
-        filenames.push(filename);
-        embeddings.extend(
-            block
-                .embeddings
-                .into_iter()
-                .map(|mut embedding| {
-                    normalize(&mut embedding);
-                    Box::new(embedding)
-                })
-                .collect::<Vec<_>>(),
-        );
+        for be in block
+            .embeddings
+            .into_iter()
+            .map(|mut embedding| {
+                normalize(&mut embedding);
+                Box::new(embedding)
+            })
+            .collect::<Vec<_>>()
+        {
+            block_embeddings.push(BlockEmbedding {
+                block_number,
+                embedding: be,
+                source_file: filename.clone(),
+            });
+        }
     }
 
-    Ok((embeddings, filenames))
+    Ok(block_embeddings)
 }
