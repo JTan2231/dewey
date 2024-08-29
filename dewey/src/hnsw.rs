@@ -6,7 +6,7 @@ use serialize_macros::Serialize;
 
 use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
-use crate::dbio::{get_all_blocks, get_directory, BLOCK_SIZE};
+use crate::dbio::{get_directory, BLOCK_SIZE};
 use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
 use crate::serialization::Serialize;
@@ -34,6 +34,8 @@ pub fn normalize(embedding: &mut Embedding) {
 }
 
 type Graph = HashMap<u64, Vec<(u64, f32)>>;
+
+const CACHE_SIZE: u32 = 20 * BLOCK_SIZE as u32;
 
 // basic in-memory nearest neighbor index
 // TODO: should we handle huge datasets, beyond what memory can hold?
@@ -88,7 +90,7 @@ impl HNSW {
         }
 
         // TODO: config param?
-        let mut cache = EmbeddingCache::new(5 * BLOCK_SIZE as u32);
+        let mut cache = EmbeddingCache::new(CACHE_SIZE);
 
         let mut rng = thread_rng();
         let mut layers = vec![HashMap::new(); l as usize];
@@ -156,12 +158,16 @@ impl HNSW {
 
         printl!(info, "connecting {} orphans", orphans.len());
         let bottom_layer: &mut Graph = layers.get_mut(l as usize - 1).unwrap();
+
+        // sorting here makes better use of the cache + how embeddings are loaded
+        let mut orphans = orphans.iter().collect::<Vec<_>>();
+        orphans.sort_by(|a, b| a.cmp(b));
         for (i, orphan) in orphans.iter().enumerate() {
             if i % (orphans.len() / 10) == 0 {
                 printl!(info, "{} orphans connected", i);
             }
 
-            let orphan = *orphan as usize;
+            let orphan = **orphan as usize;
             let e_orphan = cache.get(orphan as u32)?;
             let distances: Vec<(u64, f32)> = bottom_layer
                 .keys()
@@ -206,7 +212,7 @@ impl HNSW {
         // but rust f32 doesn't have Eq so i don't know how to work with it
         let mut top_k: Vec<(u64, f32)> = Vec::new();
 
-        let mut cache = EmbeddingCache::new(5 * BLOCK_SIZE as u32);
+        let mut cache = EmbeddingCache::new(CACHE_SIZE);
 
         let mut count = 0;
         let mut current = *self.layers[0].keys().next().unwrap();
@@ -221,6 +227,7 @@ impl HNSW {
                     .unwrap()
                     .clone()
                     .into_iter()
+                    .filter(|(n, _)| !visited[*n as usize])
                     .map(|(neighbor, _)| {
                         let e_n = cache.get(neighbor as u32).unwrap();
                         (neighbor, 1.0 - dot(query, &e_n))
@@ -238,9 +245,9 @@ impl HNSW {
                         count += 1;
                     }
 
-                    if top_k.len() >= k {
+                    if top_k.len() > k {
                         top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-                        while top_k.len() >= k {
+                        while top_k.len() > k {
                             top_k.pop();
                         }
                     }
@@ -287,11 +294,22 @@ impl HNSW {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
-        let (hnsw, _) = Self::from_bytes(&bytes, 0)?;
+        let (hnsw, count) = Self::from_bytes(&bytes, 0)?;
 
-        info!("finished deserializing index");
+        if count <= 4 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid index file",
+            ));
+        }
+
+        printl!(info, "finished deserializing index");
 
         Ok(hnsw)
+    }
+
+    pub fn get_last_layer(&self) -> &Graph {
+        self.layers.last().unwrap()
     }
 
     pub fn print_graph(&self) {

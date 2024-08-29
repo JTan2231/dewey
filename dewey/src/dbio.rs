@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
 use serialize_macros::Serialize;
 
+use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
-use crate::hnsw::normalize;
+use crate::hnsw::{normalize, HNSW};
 use crate::logger::Logger;
 use crate::openai::{embed, Embedding, EmbeddingSource};
 use crate::serialization::Serialize;
@@ -117,6 +118,141 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
             directory.push((e.id, i));
         }
     }
+
+    let directory = directory
+        .into_iter()
+        .map(|d| format!("{} {}", d.0, d.1))
+        .collect::<Vec<_>>();
+    let count = directory.len();
+    let directory = directory.join("\n");
+
+    std::fs::write(
+        format!("{}/directory", get_data_dir().to_str().unwrap()),
+        directory,
+    )?;
+
+    printl!(info, "Wrote directory with {} entries", count);
+
+    Ok(())
+}
+
+// optimizes embedding placement in blocks based on their distance from their neighbors
+pub fn reblock() -> Result<(), std::io::Error> {
+    let index = match HNSW::new(false) {
+        Ok(index) => index,
+        Err(e) => {
+            eprintln!("Error creating index: {}", e);
+            eprintln!("Note: this operation requires an index to be present");
+            eprintln!("Run `hnsw -s` to recreate your index");
+            return Err(e);
+        }
+    };
+
+    let full_graph = index.get_last_layer();
+
+    let mut blocks = vec![Vec::new()];
+    let mut i = 0;
+
+    let mut directory = Vec::new();
+    let mut visited = HashSet::new();
+    let mut stack = Vec::new();
+    stack.push(*full_graph.iter().nth(0).unwrap().0);
+
+    while let Some(current) = stack.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
+
+        if visited.len() % (full_graph.len() / 10) == 0 {
+            printl!(
+                info,
+                "blocked {} nodes into {} blocks",
+                visited.len(),
+                i + 1
+            );
+        }
+
+        if blocks[i].len() >= BLOCK_SIZE {
+            blocks.push(Vec::new());
+            i += 1;
+        }
+
+        blocks[i].push(current);
+        directory.push((current, i as u64));
+        visited.insert(current);
+
+        let mut neighbors = full_graph.get(&current).unwrap().clone();
+        neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        for (neighbor, _) in neighbors {
+            if !visited.contains(&neighbor) {
+                stack.push(neighbor);
+            }
+        }
+    }
+
+    let mut cache = EmbeddingCache::new(10 * BLOCK_SIZE as u32);
+
+    // create a temp directory in $DATA_DIR to hold all the blocks
+    let data_dir = get_data_dir();
+    let temp_dir = format!("{}/temp", data_dir.to_str().unwrap());
+
+    if std::fs::metadata(&temp_dir).is_ok() {
+        std::fs::remove_dir_all(&temp_dir)?;
+    }
+
+    std::fs::create_dir(&temp_dir)?;
+
+    for (i, block) in blocks.iter().enumerate() {
+        let filename = format!("{}/{}", temp_dir, i);
+        let mut embeddings = Vec::new();
+        for id in block {
+            let embedding = cache.get(*id as u32).unwrap();
+            embeddings.push(*embedding);
+        }
+
+        let embedding_block = EmbeddingBlock {
+            block: i as u64,
+            embeddings,
+        };
+
+        embedding_block.to_file(&filename)?;
+    }
+
+    for entry in std::fs::read_dir(data_dir.clone())? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(filename) = path.file_name() {
+                if let Some(filename) = filename.to_str() {
+                    if filename.parse::<u64>().is_ok() {
+                        std::fs::remove_file(path)?;
+                    }
+                }
+            }
+        }
+    }
+
+    std::fs::remove_file(format!("{}/directory", data_dir.to_str().unwrap()))?;
+
+    for entry in std::fs::read_dir(temp_dir.clone())? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(filename) = path.file_name() {
+                if let Some(filename) = filename.to_str() {
+                    if filename.parse::<u64>().is_ok() {
+                        std::fs::rename(
+                            path.clone(),
+                            format!("{}/{}", data_dir.to_str().unwrap(), filename),
+                        )?;
+                    }
+                }
+            }
+        }
+    }
+
+    std::fs::remove_dir_all(&temp_dir)?;
 
     let directory = directory
         .into_iter()

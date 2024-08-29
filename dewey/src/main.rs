@@ -6,8 +6,12 @@ mod ledger;
 mod logger;
 mod openai;
 mod serialization;
+mod server;
+
+use std::io::{Read, Write};
 
 use crate::logger::Logger;
+use crate::serialization::Serialize;
 
 struct Flags {
     query: String,
@@ -17,6 +21,7 @@ struct Flags {
     reindex: bool,
     help: bool,
     test: bool,
+    reblock: bool,
 }
 
 fn parse_flags() -> Flags {
@@ -29,6 +34,7 @@ fn parse_flags() -> Flags {
         reindex: false,
         help: false,
         test: false,
+        reblock: false,
     };
 
     if args.len() < 1 {
@@ -45,6 +51,7 @@ fn parse_flags() -> Flags {
                     'r' => flags.reindex = true,
                     'h' => flags.help = true,
                     't' => flags.test = true,
+                    'b' => flags.reblock = true,
                     _ => panic!("Unknown flag: {}", c),
                 }
             }
@@ -96,6 +103,43 @@ fn user_query(index: &hnsw::HNSW, query: String) -> Result<(), std::io::Error> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::setup();
     let flags = parse_flags();
+
+    if flags.help {
+        man();
+        return Ok(());
+    }
+
+    // connect to localhost:5050
+    if flags.test {
+        server::run()?;
+    }
+
+    // send user query to server
+    if !flags.query.is_empty() {
+        let mut stream = std::net::TcpStream::connect("127.0.0.1:5050")?;
+        let query = flags.query;
+        let message = server::Message {
+            message_type: "query".to_string(),
+            body: query,
+        };
+
+        let message_bytes = message.to_bytes();
+        stream.write(&message_bytes)?;
+        stream.flush()?;
+
+        let mut buffer = [0; 8192];
+        stream.read(&mut buffer)?;
+
+        let (response, _) = server::Message::from_bytes(&buffer, 0)?;
+        printl!(info, "Received response: {}", response.body);
+    }
+
+    Ok(())
+}
+
+fn main_deprecated() -> Result<(), Box<dyn std::error::Error>> {
+    config::setup();
+    let flags = parse_flags();
     let mut no_flags = true;
 
     if flags.help {
@@ -119,6 +163,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let data_dir = config::get_data_dir();
         index.serialize(&data_dir.join("index").to_str().unwrap().to_string())?;
+    }
+
+    if flags.reblock {
+        dbio::reblock()?;
     }
 
     if no_flags {

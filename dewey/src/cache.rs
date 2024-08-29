@@ -282,6 +282,7 @@ impl EmbeddingCache {
                     if let Some(node) = self.node_map.get(&id) {
                         unsafe {
                             (*node.as_ptr()).detach();
+                            self.lru.len -= 1;
                         }
                     }
 
@@ -296,13 +297,14 @@ impl EmbeddingCache {
 
         let node = self.node_map.get(&embedding_id).unwrap();
         unsafe {
-            self.lru.push_front(embedding_id);
-            // horrible hack please god refactor this
-            self.lru.len -= 1;
+            let new_node = self.lru.push_front(embedding_id);
 
             // does this actually deallocate anything lol
             // should have done this in c
             (*node.as_ptr()).detach();
+            self.lru.len -= 1;
+
+            self.node_map.insert(embedding_id, new_node);
         }
 
         // TODO: stack + heap allocation? really?
