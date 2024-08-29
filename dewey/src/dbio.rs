@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use serialize_macros::Serialize;
@@ -9,16 +10,9 @@ use crate::openai::{embed, Embedding, EmbeddingSource};
 use crate::serialization::Serialize;
 use crate::{info, printl};
 
-// these have a limit of 1024 embeddings each
-// format is:
-// - 8 bytes: number of contained embeddings
-// - n bytes: offset of each embedding
-//
-// followed by a contiguous series of the embeddings:
-// - 8 bytes: size of EmbeddingSource
-// - n bytes: EmbeddingSource
-// - 8 bytes: size of Embedding
-// - n bytes: Embedding
+// TODO: this could probably be a config parameter
+pub const BLOCK_SIZE: usize = 1024;
+
 #[derive(Serialize)]
 pub struct EmbeddingBlock {
     block: u64,
@@ -61,6 +55,9 @@ impl EmbeddingBlock {
 // synchronizes the index with the current ledger
 // TODO: ledgers need to include subsets of files
 //       we also need a proper tokenizer
+//
+// TODO: there's a smarter way to serialize these embeddings
+//       it should probably be done based on locality
 pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     let stale_sources = match full_embed {
         true => crate::ledger::read_ledger()?
@@ -91,7 +88,22 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
 
     let data_dir = get_data_dir();
 
-    let blocks = embeddings.chunks(1024);
+    let existing_blocks = std::fs::read_dir(data_dir.clone())?;
+    for entry in existing_blocks {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(filename) = path.file_name() {
+                if let Some(filename) = filename.to_str() {
+                    if filename.parse::<u64>().is_ok() {
+                        std::fs::remove_file(path)?;
+                    }
+                }
+            }
+        }
+    }
+
+    let blocks = embeddings.chunks(BLOCK_SIZE);
     for (i, block) in blocks.enumerate() {
         let filename = format!("{}/{}", data_dir.to_str().unwrap(), i);
         let embedding_block = EmbeddingBlock {
@@ -101,8 +113,8 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
 
         embedding_block.to_file(&filename)?;
 
-        for b in block {
-            directory.push((b.id, i));
+        for e in block {
+            directory.push((e.id, i));
         }
     }
 
@@ -211,4 +223,21 @@ pub fn get_all_blocks() -> Result<Vec<BlockEmbedding>, std::io::Error> {
     }
 
     Ok(block_embeddings)
+}
+
+// TODO: at what point should we worry about holding this whole thing in memory?
+pub fn get_directory() -> Result<HashMap<u32, u64>, std::io::Error> {
+    let data_dir = get_data_dir();
+    let directory = std::fs::read_to_string(format!("{}/directory", data_dir.to_str().unwrap()))?;
+    let directory = directory
+        .split("\n")
+        .map(|d| {
+            let mut parts = d.split(" ");
+            let id = parts.next().unwrap().parse::<u32>().unwrap();
+            let block = parts.next().unwrap().parse::<u64>().unwrap();
+            (id, block)
+        })
+        .collect::<HashMap<_, _>>();
+
+    Ok(directory)
 }

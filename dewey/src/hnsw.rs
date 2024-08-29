@@ -4,8 +4,9 @@ use std::io::{Read, Write};
 
 use serialize_macros::Serialize;
 
+use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
-use crate::dbio::get_all_blocks;
+use crate::dbio::{get_all_blocks, get_directory, BLOCK_SIZE};
 use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
 use crate::serialization::Serialize;
@@ -39,18 +40,12 @@ type Graph = HashMap<u64, Vec<(u64, f32)>>;
 #[derive(Serialize)]
 #[allow(unused_attributes)]
 pub struct HNSW {
-    embedding_sources: Vec<String>,
-    // this should really go soon in favor of optimization
-    // we can't really afford to have the whole db in memory, can we?
-    #[ignore]
-    nodes: Vec<Box<Embedding>>,
+    pub size: u32,
     pub layers: Vec<Graph>,
 }
 
 impl HNSW {
     pub fn new(reindex: bool) -> Result<Self, std::io::Error> {
-        // TODO: boxing here instead of when they're loaded from file is gross
-        //       and can probably be more efficient
         if !reindex {
             info!("loading index from disk");
             let data_dir = get_data_dir();
@@ -60,19 +55,9 @@ impl HNSW {
 
         info!("building index from block files");
 
-        let block_embeddings = get_all_blocks()?;
+        let directory = get_directory()?;
 
-        let mut embeddings = Vec::new();
-        let mut sources = Vec::new();
-        for be in block_embeddings {
-            embeddings.push(be.embedding.clone());
-            sources.push(be.source_file);
-        }
-
-        let id_map: HashMap<u64, usize> =
-            HashMap::from_iter(embeddings.iter().enumerate().map(|(i, e)| (e.id, i)));
-
-        let n = embeddings.len();
+        let n = directory.len();
         let m = n.ilog2();
         let l = n.ilog2();
         let p = 1.0 / m as f32;
@@ -102,8 +87,12 @@ impl HNSW {
             orphans.insert(i as u32);
         }
 
+        // TODO: config param?
+        let mut cache = EmbeddingCache::new(5 * BLOCK_SIZE as u32);
+
         let mut rng = thread_rng();
         let mut layers = vec![HashMap::new(); l as usize];
+        // for each embedding e[i]
         for i in 0..n {
             if i % (n / 10) == 0 {
                 printl!(
@@ -127,32 +116,28 @@ impl HNSW {
                 // this whole struct really needs a refactor
                 if prob < thresholds[j] {
                     orphans.remove(&(i as u32));
+                    let e_i = cache.get(i as u32)?;
+
                     for k in (j as u32)..l {
                         let k = k as usize;
                         let layer: &mut Graph = layers.get_mut(k).unwrap();
 
                         if layer.len() == 0 {
-                            layer.insert(embeddings[i].id, Vec::new());
+                            layer.insert(e_i.id, Vec::new());
                         } else {
                             let distances: Vec<(u64, f32)> = layer
                                 .keys()
                                 .take(m as usize)
-                                .map(|&node| {
-                                    (
-                                        node,
-                                        1.0 - dot(
-                                            embeddings[i].as_ref(),
-                                            embeddings[id_map[&node]].as_ref(),
-                                        ),
-                                    )
+                                .map(|&neighbor| {
+                                    let e_neighbor = cache.get(neighbor as u32).unwrap();
+                                    (neighbor, 1.0 - dot(&e_i, &e_neighbor))
                                 })
                                 .collect();
 
                             let mut updates = Vec::new();
                             for &(node, d) in distances.iter() {
-                                let id = embeddings[i].id;
-                                updates.push((node, id, d));
-                                updates.push((id, node, d));
+                                updates.push((node, e_i.id, d));
+                                updates.push((e_i.id, node, d));
                             }
 
                             for (key, value, d) in updates {
@@ -177,25 +162,20 @@ impl HNSW {
             }
 
             let orphan = *orphan as usize;
+            let e_orphan = cache.get(orphan as u32)?;
             let distances: Vec<(u64, f32)> = bottom_layer
                 .keys()
                 .take(m as usize)
-                .map(|&node| {
-                    (
-                        node,
-                        1.0 - dot(
-                            embeddings[orphan].as_ref(),
-                            embeddings[id_map[&node]].as_ref(),
-                        ),
-                    )
+                .map(|&neighbor| {
+                    let e_neighbor = cache.get(neighbor as u32).unwrap();
+                    (neighbor, 1.0 - dot(&e_orphan, &e_neighbor))
                 })
                 .collect();
 
             let mut updates = Vec::new();
             for &(node, d) in distances.iter() {
-                let id = embeddings[orphan].id;
-                updates.push((node, id, d));
-                updates.push((id, node, d));
+                updates.push((node, e_orphan.id, d));
+                updates.push((e_orphan.id, node, d));
             }
 
             for (key, value, d) in updates {
@@ -211,23 +191,22 @@ impl HNSW {
         printl!(info, "finished building index");
 
         Ok(Self {
-            embedding_sources: sources,
-            nodes: embeddings,
+            size: n as u32,
             layers,
         })
     }
 
-    // should load files as needed
-    // needs a rewrite
     pub fn query(&self, query: &Embedding, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
         if ef < k {
             panic!("ef must be greater than k");
         }
 
-        let mut visited = vec![false; self.nodes.len()];
+        let mut visited = vec![false; self.size as usize];
         // frankly just a stupid way of using this instead of a min heap
         // but rust f32 doesn't have Eq so i don't know how to work with it
         let mut top_k: Vec<(u64, f32)> = Vec::new();
+
+        let mut cache = EmbeddingCache::new(5 * BLOCK_SIZE as u32);
 
         let mut count = 0;
         let mut current = *self.layers[0].keys().next().unwrap();
@@ -242,7 +221,10 @@ impl HNSW {
                     .unwrap()
                     .clone()
                     .into_iter()
-                    .map(|(n, _)| (n, 1.0 - dot(query, self.nodes[n as usize].as_ref())))
+                    .map(|(neighbor, _)| {
+                        let e_n = cache.get(neighbor as u32).unwrap();
+                        (neighbor, 1.0 - dot(query, &e_n))
+                    })
                     .collect::<Vec<_>>();
 
                 neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -266,7 +248,7 @@ impl HNSW {
                     if count >= ef {
                         return top_k
                             .into_iter()
-                            .map(|(node, distance)| (self.nodes[node as usize].clone(), distance))
+                            .map(|(node, distance)| (cache.get(node as u32).unwrap(), distance))
                             .collect::<Vec<_>>();
                     }
                 }
@@ -279,7 +261,7 @@ impl HNSW {
         top_k.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         top_k
             .into_iter()
-            .map(|(node, distance)| (self.nodes[node as usize].clone(), distance))
+            .map(|(node, distance)| (cache.get(node as u32).unwrap(), distance))
             .collect::<Vec<_>>()
     }
 
@@ -305,15 +287,7 @@ impl HNSW {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
-        let (mut hnsw, _) = Self::from_bytes(&bytes, 0)?;
-
-        let embedding_blocks = get_all_blocks()?;
-        let embeddings = embedding_blocks
-            .into_iter()
-            .map(|be| be.embedding)
-            .collect::<Vec<_>>();
-
-        hnsw.nodes = embeddings;
+        let (hnsw, _) = Self::from_bytes(&bytes, 0)?;
 
         info!("finished deserializing index");
 

@@ -14,7 +14,7 @@ const WHITELIST: &[&str] = &[
     "vb", "bas", "erl", "hrl", "ada", "adb", "ads", "clj", "cljs", "cljc", "fs", "fsx", "cob",
     "cbl", "pas", "pp", "pro", "scm", "ss", "tcl", "v", "vh", "vhd", "vhdl", "xml", "md",
     "markdown", "ipynb", "ps1", "psm1", "psd1", "bat", "cmd", "elm", "ex", "exs", "ml", "mli",
-    "mat", "sql", "txt",
+    "mat", "sql", "txt", "txtl", "txtp",
 ];
 
 #[derive(Debug, PartialEq)]

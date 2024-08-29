@@ -1,3 +1,4 @@
+mod cache;
 mod config;
 mod dbio;
 mod hnsw;
@@ -96,12 +97,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::setup();
     let flags = parse_flags();
     let mut no_flags = true;
-
-    if flags.test {
-        let index = hnsw::HNSW::new(false)?;
-        index.print_graph();
-        return Ok(());
-    }
 
     if flags.help {
         man();
