@@ -3,22 +3,13 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::config;
-use crate::hnsw::HNSW;
-use crate::info;
-use crate::logger::Logger;
-use crate::openai::{embed, read_source, EmbeddingSource};
-use crate::serialization::Serialize;
-
-use serialize_macros::Serialize;
-
-// TODO: message type enum for the serialization macros
-
-#[derive(Serialize)]
-pub struct Message {
-    pub message_type: String,
-    pub body: String,
-}
+use dewey_lib::config;
+use dewey_lib::hnsw::HNSW;
+use dewey_lib::info;
+use dewey_lib::logger::Logger;
+use dewey_lib::message::Message;
+use dewey_lib::openai::{embed, read_source, EmbeddingSource};
+use dewey_lib::serialization::Serialize;
 
 fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), std::io::Error> {
     let mut buffer = [0; 8192];
@@ -60,7 +51,9 @@ fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), s
     Ok(())
 }
 
-pub fn run() -> std::io::Result<()> {
+pub fn main() -> std::io::Result<()> {
+    config::setup();
+
     let listener = TcpListener::bind("127.0.0.1:5050").unwrap();
     info!("Server listening on port 5050");
 

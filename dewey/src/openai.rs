@@ -5,12 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serialize_macros::Serialize;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::ledger::{get_indexing_rules, IndexRuleType};
 use crate::logger::Logger;
 use crate::serialization::Serialize;
-use crate::{error, info, printl};
+use crate::{error, info};
 
 pub const EMBED_DIM: usize = 1536;
 
@@ -73,21 +72,21 @@ fn separator_split(
     separator: &String,
 ) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
     let contents = read_source(&source)?;
-    let chars = contents.graphemes(true).collect::<Vec<&str>>();
+    let chars = contents.chars().collect::<Vec<char>>();
 
     let mut chunks = Vec::new();
     let mut chunk = String::new();
     let mut i = 0;
     while i < chars.len() - separator.len() {
-        let window = chars[i..i + separator.len()].join("");
+        let window = String::from_iter(&chars[i..i + separator.len()]);
         if window == *separator || chunk.len() >= TOKEN_LIMIT {
             chunks.push((chunk.clone(), (i - chunk.len(), i)));
             chunk.clear();
 
             i += separator.len();
         } else {
-            chunk.push_str(chars[i]);
-            i += chars[i].len();
+            chunk.push_str(chars[i].to_string().as_str());
+            i += 1;
         }
     }
 
@@ -108,7 +107,7 @@ fn naive_split(
     _separator: &String,
 ) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
     let source_contents = read_source(&source)?;
-    let chars = source_contents.graphemes(true).collect::<Vec<&str>>();
+    let chars = source_contents.chars().collect::<Vec<_>>();
 
     let mut chunks = Vec::new();
     let mut chunk = String::new();
@@ -119,8 +118,8 @@ fn naive_split(
             chunk.clear();
             i += 1;
         } else {
-            chunk.push_str(chars[i]);
-            i += chars[i].len();
+            chunk.push_str(chars[i].to_string().as_str());
+            i += 1;
         }
     }
 
@@ -134,6 +133,7 @@ fn naive_split(
     Ok(chunks)
 }
 
+// NOTE: does _not_ support anything but ascii
 fn batch_sources(
     sources: &Vec<EmbeddingSource>,
 ) -> Result<Vec<Vec<(EmbeddingSource, String)>>, std::io::Error> {
@@ -241,9 +241,12 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
     let (tx, rx) = std::sync::mpsc::channel::<Vec<(EmbeddingSource, String)>>();
     let rx = Arc::new(Mutex::new(rx));
 
+    // API requests need batched up to keep from exceeding token limits
+    let batches = batch_sources(&sources)?;
+
     let embeddings = Arc::new(Mutex::new(Vec::new()));
     let count = Arc::new(Mutex::new(0));
-    for i in 0..NUM_THREADS {
+    for i in 0..std::cmp::min(NUM_THREADS, batches.len()) {
         let thread_rx = Arc::clone(&rx);
         let params = params.clone();
         let embeddings = Arc::clone(&embeddings);
@@ -298,8 +301,6 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
                             .connect(&params.host, stream)
                             .expect("Failed to establish TLS connection");
 
-                        info!("Connected to OpenAI API");
-
                         let body = serde_json::json!({
                             "model": params.model,
                             "input": batch.iter().map(|pair| pair.1.clone()).collect::<Vec<String>>(),
@@ -340,8 +341,6 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
                                 return Err(e);
                             }
                         }
-
-                        info!("Sent request of size {} to OpenAI API", json_string.len());
 
                         let mut reader = std::io::BufReader::new(&mut stream);
 
@@ -399,8 +398,6 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
                             ));
                         }
 
-                        info!("Parsed JSON response");
-
                         let response_json: serde_json::Value = response_json.unwrap();
                         let data = match response_json["data"].as_array() {
                             Some(data) => data,
@@ -443,7 +440,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
                         let mut count = count.lock().unwrap();
                         *count += 1;
                         if *count % 100 == 0 {
-                            printl!(info, "{} embeddings made", *count);
+                            info!("{} embeddings made", *count);
                         }
                     }
 
@@ -465,9 +462,7 @@ pub fn embed(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::
         thread_pool.push(thread);
     }
 
-    // API requests need batched up to keep from exceeding token limits
-    let batches = batch_sources(&sources)?;
-    printl!(info, "working through {} batches", batches.len());
+    info!("working through {} batches", batches.len());
     for batch in batches.iter() {
         tx.send(batch.clone()).unwrap();
     }

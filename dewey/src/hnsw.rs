@@ -7,10 +7,10 @@ use serialize_macros::Serialize;
 use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
 use crate::dbio::{get_directory, BLOCK_SIZE};
+use crate::info;
 use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
 use crate::serialization::Serialize;
-use crate::{info, printl};
 
 pub fn dot(a: &Embedding, b: &Embedding) -> f32 {
     let mut sum = 0.;
@@ -64,13 +64,9 @@ impl HNSW {
         let l = n.ilog2();
         let p = 1.0 / m as f32;
 
-        printl!(
-            info,
+        info!(
             "building HNSW with \n\tn: {}\n\tm: {}\n\tl: {}\n\tp: {}",
-            n,
-            m,
-            l,
-            p
+            n, m, l, p
         );
 
         let thresholds = (0..l)
@@ -97,8 +93,7 @@ impl HNSW {
         // for each embedding e[i]
         for i in 0..n {
             if i % (n / 10) == 0 {
-                printl!(
-                    info,
+                info!(
                     "{} connected nodes, {} orphans, {} nodes attempted",
                     n - orphans.len(),
                     orphans.len(),
@@ -156,7 +151,7 @@ impl HNSW {
             }
         }
 
-        printl!(info, "connecting {} orphans", orphans.len());
+        info!("connecting {} orphans", orphans.len());
         let bottom_layer: &mut Graph = layers.get_mut(l as usize - 1).unwrap();
 
         // sorting here makes better use of the cache + how embeddings are loaded
@@ -164,7 +159,7 @@ impl HNSW {
         orphans.sort_by(|a, b| a.cmp(b));
         for (i, orphan) in orphans.iter().enumerate() {
             if i % (orphans.len() / 10) == 0 {
-                printl!(info, "{} orphans connected", i);
+                info!("{} orphans connected", i);
             }
 
             let orphan = **orphan as usize;
@@ -194,7 +189,7 @@ impl HNSW {
             }
         }
 
-        printl!(info, "finished building index");
+        info!("finished building index");
 
         Ok(Self {
             size: n as u32,
@@ -288,7 +283,7 @@ impl HNSW {
     }
 
     pub fn deserialize(filepath: String) -> Result<Self, std::io::Error> {
-        printl!(info, "deserializing index from {}", filepath);
+        info!("deserializing index from {}", filepath);
 
         let mut file = std::fs::File::open(filepath)?;
         let mut bytes = Vec::new();
@@ -303,7 +298,7 @@ impl HNSW {
             ));
         }
 
-        printl!(info, "finished deserializing index");
+        info!("finished deserializing index");
 
         Ok(hnsw)
     }

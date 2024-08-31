@@ -6,10 +6,10 @@ use serialize_macros::Serialize;
 use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
 use crate::hnsw::{normalize, HNSW};
+use crate::info;
 use crate::logger::Logger;
 use crate::openai::{embed, Embedding, EmbeddingSource};
 use crate::serialization::Serialize;
-use crate::{info, printl};
 
 // TODO: this could probably be a config parameter
 pub const BLOCK_SIZE: usize = 1024;
@@ -21,20 +21,12 @@ pub struct EmbeddingBlock {
 }
 
 impl EmbeddingBlock {
-    pub fn from_file(filename: &str, block: u64) -> Result<Self, std::io::Error> {
+    pub fn from_file(filename: &str, _block: u64) -> Result<Self, std::io::Error> {
         let mut file = std::fs::File::open(filename)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 
-        info!("Read {} bytes from {}", bytes.len(), filename);
         let (embed_block, _) = EmbeddingBlock::from_bytes(&bytes, 0)?;
-
-        info!("loaded block {} from {}", block, filename);
-        info!(
-            "block: {}, embeddings: {}",
-            embed_block.block,
-            embed_block.embeddings.len()
-        );
 
         Ok(embed_block)
     }
@@ -131,7 +123,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         directory,
     )?;
 
-    printl!(info, "Wrote directory with {} entries", count);
+    info!("Wrote directory with {} entries", count);
 
     Ok(())
 }
@@ -164,12 +156,7 @@ pub fn reblock() -> Result<(), std::io::Error> {
         }
 
         if visited.len() % (full_graph.len() / 10) == 0 {
-            printl!(
-                info,
-                "blocked {} nodes into {} blocks",
-                visited.len(),
-                i + 1
-            );
+            info!("blocked {} nodes into {} blocks", visited.len(), i + 1);
         }
 
         if blocks[i].len() >= BLOCK_SIZE {
@@ -266,7 +253,7 @@ pub fn reblock() -> Result<(), std::io::Error> {
         directory,
     )?;
 
-    printl!(info, "Wrote directory with {} entries", count);
+    info!("Wrote directory with {} entries", count);
 
     Ok(())
 }

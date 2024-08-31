@@ -144,6 +144,7 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
                     .replace("\\t", "\t")
                     .replace("\\r", "\r");
                 rules.push(rule);
+
                 rule = IndexRule {
                     rule_type: IndexRuleType::Naive,
                     value: "".to_string(),
