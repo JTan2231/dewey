@@ -17,13 +17,20 @@ const WHITELIST: &[&str] = &[
     "mat", "sql", "txt", "txtl", "txtp",
 ];
 
-#[derive(Debug, PartialEq)]
+// TODO: there needs to be better delineation on the different rule types
+//       Currently, MinLength and Alphanumeric act as filters,
+//       while the rest act as splitting rules.
+//       Filters are applied _only_ after splitting rules.
+#[derive(Debug, PartialEq, Clone)]
 pub enum IndexRuleType {
     Split,
     Naive,
+    MinLength,
+    MaxLength,
+    Alphanumeric,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct IndexRule {
     pub rule_type: IndexRuleType,
     pub value: String,
@@ -131,6 +138,9 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
             if part.starts_with("--") {
                 match part.to_lowercase().as_str() {
                     "--split" => rule.rule_type = IndexRuleType::Split,
+                    "--maxlength" => rule.rule_type = IndexRuleType::MaxLength,
+                    "--minlength" => rule.rule_type = IndexRuleType::MinLength,
+                    "--alphanumeric" => rule.rule_type = IndexRuleType::Alphanumeric,
                     _ => {
                         error!("Ignoring unknown rule type: {}", part);
                     }
@@ -143,6 +153,32 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
                     .replace("\\n", "\n")
                     .replace("\\t", "\t")
                     .replace("\\r", "\r");
+
+                // value validation
+                match rule.rule_type {
+                    IndexRuleType::MinLength => {
+                        if rule.value.parse::<usize>().is_err() {
+                            error!("Ignoring invalid min length value: {}", rule.value);
+                            continue;
+                        }
+                    }
+                    IndexRuleType::MaxLength => {
+                        if rule.value.parse::<usize>().is_err() {
+                            error!("Ignoring invalid max length value: {}", rule.value);
+                            continue;
+                        }
+                    }
+                    IndexRuleType::Alphanumeric => {
+                        if rule.value.to_lowercase() != "true"
+                            && rule.value.to_lowercase() != "false"
+                        {
+                            error!("Ignoring invalid alphanumeric value: {}", rule.value);
+                            continue;
+                        }
+                    }
+                    _ => (),
+                }
+
                 rules.push(rule);
 
                 rule = IndexRule {

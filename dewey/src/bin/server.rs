@@ -25,16 +25,16 @@ fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), s
     std::fs::write(path.clone(), message.body)?;
     info!("Wrote query to {}", path.to_string_lossy());
 
-    let embedding = embed(&vec![EmbeddingSource {
+    let embedding = embed(&EmbeddingSource {
         filepath: path.to_string_lossy().to_string(),
         subset: None,
-    }])?;
+    })?;
 
     #[allow(unused_assignments)]
     let mut index_result = String::new();
     {
         let index = index.lock().unwrap();
-        let result = index.query(&embedding[0], 1, 200);
+        let result = index.query(&embedding, 1, 200);
 
         index_result = read_source(&result[0].0.source_file)?;
     }

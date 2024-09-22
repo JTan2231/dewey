@@ -30,7 +30,8 @@ fn parse_flags() -> Flags {
     };
 
     if args.len() < 1 {
-        panic!("Usage: {} [-sef]", args[0]);
+        man();
+        std::process::exit(1);
     }
 
     for arg in args.iter().skip(1) {
@@ -56,13 +57,20 @@ fn parse_flags() -> Flags {
 }
 
 fn man() {
-    println!("Usage: ./main [-sef] [query]");
-    println!("\t-s: sync ledger config");
-    println!("\t-e: embed stale files");
-    println!("\t-f: full embed all files");
-    println!("\t-r: reindex the hnsw index");
-    println!("\t-h: print this help message");
-    println!("\tquery: query to search for");
+    println!("Usage: dewey [-sefrhb] [query]");
+    println!("\nFlags:");
+    println!("\t-s: Sync kedger with config");
+    println!("\t-e: Embed missing items in ledger");
+    println!("\t-f: Embed all items in ledger");
+    println!("\t-r: Reindex embeddings");
+    println!("\t-h: Print this help message");
+    println!("\t-b: Reblock embeddings");
+    println!("\nQuery:");
+    println!("\tQuery to send to the server");
+    println!("\nExamples:");
+    println!("\tdewey -ser");
+    println!("\tdewey -serb");
+    println!("\tdewey -sfrb \"query\"");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

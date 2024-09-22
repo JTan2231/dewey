@@ -8,7 +8,7 @@ use crate::config::get_data_dir;
 use crate::hnsw::{normalize, HNSW};
 use crate::info;
 use crate::logger::Logger;
-use crate::openai::{embed, Embedding, EmbeddingSource};
+use crate::openai::{embed_bulk, Embedding, EmbeddingSource};
 use crate::serialization::Serialize;
 
 // TODO: this could probably be a config parameter
@@ -72,7 +72,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         }
     };
 
-    let mut embeddings = embed(&stale_sources)?;
+    let mut embeddings = embed_bulk(&stale_sources)?;
     for (i, e) in embeddings.iter_mut().enumerate() {
         e.id = i as u64;
     }
