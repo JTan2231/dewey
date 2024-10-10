@@ -28,24 +28,17 @@ pub struct Node<T> {
 
 pub struct Iter<'a, T> {
     front: Link<T>,
-    back: Link<T>,
     len: usize,
     _boo: PhantomData<&'a T>,
 }
 
 pub struct IterMut<'a, T> {
     front: Link<T>,
-    back: Link<T>,
     len: usize,
     _boo: PhantomData<&'a mut T>,
 }
 
-pub struct IntoIter<T> {
-    list: LinkedList<T>,
-}
-
 impl<T: Clone> Node<T> {
-    // the fact that this doesn't alter the list len is really stupid
     pub fn detach(&mut self) -> T {
         if let Some(front) = self.front {
             unsafe {
@@ -119,7 +112,6 @@ impl<T> LinkedList<T> {
     pub fn iter(&self) -> Iter<T> {
         Iter {
             front: self.front,
-            back: self.back,
             len: self.len,
             _boo: PhantomData,
         }
@@ -128,7 +120,6 @@ impl<T> LinkedList<T> {
     pub fn iter_mut(&mut self) -> IterMut<T> {
         IterMut {
             front: self.front,
-            back: self.back,
             len: self.len,
             _boo: PhantomData,
         }
@@ -164,11 +155,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // While self.front == self.back is a tempting condition to check here,
-        // it won't do the right for yielding the last element! That sort of
-        // thing only works for arrays because of "one-past-the-end" pointers.
         if self.len > 0 {
-            // We could unwrap front, but this is safer and easier
             self.front.map(|node| unsafe {
                 self.len -= 1;
                 self.front = (*node.as_ptr()).back;

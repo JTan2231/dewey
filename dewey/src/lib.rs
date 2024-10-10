@@ -6,4 +6,5 @@ pub mod ledger;
 pub mod logger;
 pub mod message;
 pub mod openai;
+pub mod parsing;
 pub mod serialization;

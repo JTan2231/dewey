@@ -6,10 +6,10 @@ use serialize_macros::Serialize;
 use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
 use crate::hnsw::{normalize, HNSW};
-use crate::info;
 use crate::logger::Logger;
 use crate::openai::{embed_bulk, Embedding, EmbeddingSource};
 use crate::serialization::Serialize;
+use crate::{error, info};
 
 // TODO: this could probably be a config parameter
 pub const BLOCK_SIZE: usize = 1024;
@@ -48,15 +48,13 @@ impl EmbeddingBlock {
 // synchronizes the index with the current ledger
 // TODO: ledgers need to include subsets of files
 //       we also need a proper tokenizer
-//
-// TODO: there's a smarter way to serialize these embeddings
-//       it should probably be done based on locality
 pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     let stale_sources = match full_embed {
         true => crate::ledger::read_ledger()?
             .into_iter()
-            .map(|le| EmbeddingSource {
-                filepath: le.filepath.clone(),
+            .map(|entry| EmbeddingSource {
+                filepath: entry.filepath.clone(),
+                meta: entry.meta.clone(),
                 subset: None,
             })
             .collect::<Vec<_>>(),
@@ -64,8 +62,9 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
             let stale_files = crate::ledger::get_stale_files()?;
             stale_files
                 .iter()
-                .map(|f| EmbeddingSource {
-                    filepath: f.clone(),
+                .map(|entry| EmbeddingSource {
+                    filepath: entry.filepath.clone(),
+                    meta: entry.meta.clone(),
                     subset: None,
                 })
                 .collect::<Vec<_>>()
@@ -129,6 +128,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
 }
 
 // optimizes embedding placement in blocks based on their distance from their neighbors
+// also syncs meta changes from the ledger
 pub fn reblock() -> Result<(), std::io::Error> {
     let index = match HNSW::new(false) {
         Ok(index) => index,
@@ -180,6 +180,13 @@ pub fn reblock() -> Result<(), std::io::Error> {
 
     let mut cache = EmbeddingCache::new(10 * BLOCK_SIZE as u32);
 
+    // update meta
+    let ledger = crate::ledger::read_ledger()?;
+    let mut ledger_map = std::collections::HashMap::new();
+    for entry in ledger.iter() {
+        ledger_map.insert(entry.filepath.clone(), entry.meta.clone());
+    }
+
     // create a temp directory in $DATA_DIR to hold all the blocks
     let data_dir = get_data_dir();
     let temp_dir = format!("{}/temp", data_dir.to_str().unwrap());
@@ -194,7 +201,18 @@ pub fn reblock() -> Result<(), std::io::Error> {
         let filename = format!("{}/{}", temp_dir, i);
         let mut embeddings = Vec::new();
         for id in block {
-            let embedding = cache.get(*id as u32).unwrap();
+            let mut embedding = cache.get(*id as u32).unwrap();
+            embedding.source_file.meta = match ledger_map.get(&embedding.source_file.filepath) {
+                Some(meta) => meta.clone(),
+                None => {
+                    error!(
+                        "File {} unaccounted for in ledger! Ignoring meta",
+                        embedding.source_file.filepath
+                    );
+                    embedding.source_file.meta
+                }
+            };
+
             embeddings.push(*embedding);
         }
 

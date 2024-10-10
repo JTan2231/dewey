@@ -6,8 +6,8 @@ use std::thread;
 
 use serialize_macros::Serialize;
 
-use crate::ledger::{get_indexing_rules, IndexRuleType};
 use crate::logger::Logger;
+use crate::parsing::{batch_sources, read_source, TOKEN_LIMIT};
 use crate::serialization::Serialize;
 use crate::{error, info};
 
@@ -25,6 +25,7 @@ struct RequestParams {
 #[derive(Debug, Clone, Serialize)]
 pub struct EmbeddingSource {
     pub filepath: String,
+    pub meta: std::collections::HashSet<String>,
     pub subset: Option<(u64, u64)>,
 }
 
@@ -33,249 +34,6 @@ pub struct Embedding {
     pub id: u64,
     pub source_file: EmbeddingSource,
     pub data: [f32; EMBED_DIM],
-}
-
-pub fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
-    let mut file = match std::fs::File::open(&source.filepath) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Failed to open file: {:?}", e);
-            return Err(e);
-        }
-    };
-
-    let mut buffer = Vec::new();
-    let contents = match file.read_to_end(&mut buffer) {
-        Ok(_) => String::from_utf8_lossy(&buffer).to_string(),
-        Err(e) => {
-            error!("Failed to read from file {}: {:?}", source.filepath, e);
-            return Err(e);
-        }
-    };
-
-    // TODO: we can easily get away without loading the entire file into memory
-    let contents = match source.subset {
-        Some((start, end)) => contents[start as usize..end as usize].to_string(),
-        _ => contents,
-    };
-
-    // CRLF -> LF
-    let contents = contents.replace("\r\n", "\n");
-
-    Ok(contents)
-}
-
-// TODO: a proper tokenizer
-const TOKEN_LIMIT: usize = 8192;
-fn separator_split(
-    source: &EmbeddingSource,
-    separator: &String,
-) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
-    let contents = read_source(&source)?;
-    let chars = contents.chars().collect::<Vec<char>>();
-
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    let mut i = 0;
-    while i < chars.len() - separator.len() {
-        let window = String::from_iter(&chars[i..i + separator.len()]);
-        if window == *separator || chunk.len() >= TOKEN_LIMIT {
-            chunks.push((chunk.clone(), (i - chunk.len(), i)));
-            chunk.clear();
-
-            i += separator.len();
-        } else {
-            chunk.push_str(chars[i].to_string().as_str());
-            i += 1;
-        }
-    }
-
-    if !chunk.is_empty() {
-        chunks.push((
-            chunk.clone(),
-            (contents.len() - chunk.len(), contents.len()),
-        ));
-    }
-
-    Ok(chunks)
-}
-
-// this only has a _separator argument so it can be used as a function pointer
-// for either this or `separator_split`
-fn naive_split(
-    source: &EmbeddingSource,
-    _separator: &String,
-) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
-    let source_contents = read_source(&source)?;
-    let chars = source_contents.chars().collect::<Vec<_>>();
-
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chunk.len() >= TOKEN_LIMIT {
-            chunks.push((chunk.clone(), (i - chunk.len(), i)));
-            chunk.clear();
-            i += 1;
-        } else {
-            chunk.push_str(chars[i].to_string().as_str());
-            i += 1;
-        }
-    }
-
-    if !chunk.is_empty() {
-        chunks.push((
-            chunk.clone(),
-            (source_contents.len() - chunk.len(), source_contents.len()),
-        ));
-    }
-
-    Ok(chunks)
-}
-
-fn max_length_split(
-    source: &EmbeddingSource,
-    max_length: &String,
-) -> Result<Vec<(String, (usize, usize))>, std::io::Error> {
-    let source_contents = read_source(&source)?;
-    let chars = source_contents.chars().collect::<Vec<_>>();
-    let max_length = max_length.parse::<usize>().unwrap();
-
-    let mut chunks = Vec::new();
-    let mut chunk = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chunk.len() >= TOKEN_LIMIT || chunk.len() >= max_length {
-            chunks.push((chunk.clone(), (i - chunk.len(), i)));
-            chunk.clear();
-            i += 1;
-        } else {
-            chunk.push_str(chars[i].to_string().as_str());
-            i += 1;
-        }
-    }
-
-    if !chunk.is_empty() {
-        chunks.push((
-            chunk.clone(),
-            (source_contents.len() - chunk.len(), source_contents.len()),
-        ));
-    }
-
-    Ok(chunks)
-}
-
-// NOTE: does _not_ support anything but ascii
-fn batch_sources(
-    sources: &Vec<EmbeddingSource>,
-) -> Result<Vec<Vec<(EmbeddingSource, String)>>, std::io::Error> {
-    let indexing_rules = get_indexing_rules()?;
-    let base = Vec::new();
-    let global_rules = indexing_rules.get("*").unwrap_or(&base);
-    info!("batching with rules: {:?}", indexing_rules);
-    // API requests need batched up to keep from exceeding token limits
-    let mut batches: Vec<Vec<(EmbeddingSource, String)>> = vec![Vec::new()];
-    for source in sources {
-        let extension = match source.filepath.split(".").last() {
-            Some(extension) => extension,
-            _ => {
-                error!("Failed to get extension from file: {:?}", source.filepath);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Failed to get extension from file",
-                ));
-            }
-        };
-
-        let mut rules = global_rules.clone();
-        if let Some(extension_rules) = indexing_rules.get(extension) {
-            rules.extend(extension_rules.clone());
-        }
-
-        let mut rule_arg = "".to_string();
-        let split_function: fn(
-            &EmbeddingSource,
-            &String,
-        ) -> Result<Vec<(String, (usize, usize))>, std::io::Error> = {
-            let mut rule_type = "".to_string();
-            for rule in rules.iter() {
-                match rule.rule_type {
-                    IndexRuleType::Split => {
-                        rule_arg = rule.value.clone();
-                        rule_type = "separator".to_string();
-                    }
-                    IndexRuleType::MaxLength => {
-                        rule_arg = rule.value.clone();
-                        rule_type = "max_length".to_string();
-                    }
-                    _ => (),
-                }
-            }
-
-            match rule_type.as_str() {
-                "separator" => separator_split,
-                "max_length" => max_length_split,
-                _ => naive_split,
-            }
-        };
-
-        let mut contents_split = split_function(&source, &rule_arg)?;
-
-        // there's probably a better way to apply these filters
-        // in conjunction with the splitters
-        for rule in rules {
-            match rule.rule_type {
-                IndexRuleType::MinLength => {
-                    let min_length = rule.value.parse::<usize>().unwrap();
-                    contents_split.retain(|(_, range)| range.1 - range.0 >= min_length);
-                }
-                IndexRuleType::Alphanumeric => {
-                    contents_split.retain(|(contents, _)| {
-                        contents
-                            .chars()
-                            .any(|c| c.is_alphanumeric() || c.is_whitespace())
-                    });
-                }
-                _ => (),
-            }
-        }
-
-        let mut split = batches.last_mut().unwrap();
-        let mut split_len = 0;
-        for (contents, window) in contents_split {
-            if contents.len() + split_len >= TOKEN_LIMIT {
-                batches.push(Vec::new());
-
-                split = batches.last_mut().unwrap();
-                split_len = 0;
-            }
-
-            if contents.len() > 0 {
-                split_len += contents.len();
-                let new_source = EmbeddingSource {
-                    filepath: source.filepath.clone(),
-                    subset: Some((window.0 as u64, window.1 as u64)),
-                };
-                split.push((new_source, contents));
-            }
-        }
-    }
-
-    batches.retain(|batch| !batch.is_empty());
-
-    info!(
-        "batched {} sources into {} batches",
-        sources.len(),
-        batches.len()
-    );
-
-    println!(
-        "batched {} sources into {} batches",
-        sources.len(),
-        batches.len()
-    );
-
-    Ok(batches)
 }
 
 pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::Error> {
@@ -486,7 +244,7 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
                         Ok(())
                     };
 
-                    thread::sleep(std::time::Duration::from_millis(250));
+                    thread::sleep(std::time::Duration::from_millis(500));
 
                     {
                         let mut count = count.lock().unwrap();
@@ -529,6 +287,7 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
     Ok(embeddings)
 }
 
+// is there any way to not repeat this
 pub fn embed(source: &EmbeddingSource) -> Result<Embedding, std::io::Error> {
     let params = RequestParams {
         host: "api.openai.com".to_string(),

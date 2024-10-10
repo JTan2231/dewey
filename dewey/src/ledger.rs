@@ -25,6 +25,7 @@ const WHITELIST: &[&str] = &[
 pub enum IndexRuleType {
     Split,
     Naive,
+    Code,
     MinLength,
     MaxLength,
     Alphanumeric,
@@ -36,10 +37,11 @@ pub struct IndexRule {
     pub value: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LedgerEntry {
     pub filepath: String,
     pub hash: String,
+    pub meta: std::collections::HashSet<String>,
 }
 
 pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
@@ -55,10 +57,19 @@ pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
         }
 
         let parts: Vec<&str> = line.split_whitespace().filter(|s| !s.is_empty()).collect();
-        if parts.len() == 2 {
+        if parts
+            .get(0)
+            .map_or(false, |path| std::path::Path::new(path).exists())
+        {
+            let mut meta = std::collections::HashSet::new();
+            for part in parts.iter().skip(1) {
+                meta.insert(part.to_string());
+            }
+
             entries.push(LedgerEntry {
                 filepath: parts[0].to_string(),
                 hash: parts[1].to_string(),
+                meta,
             });
         } else {
             panic!("Malformed ledger entry: {:?}", parts);
@@ -71,13 +82,13 @@ pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
 }
 
 // returns a list of files whose hashes are out of date with file contents
-pub fn get_stale_files() -> Result<Vec<String>, std::io::Error> {
+pub fn get_stale_files() -> Result<Vec<LedgerEntry>, std::io::Error> {
     let ledger = read_ledger()?;
     let mut stale_files = Vec::new();
     for entry in ledger.iter() {
         let hash = get_hash(&entry.filepath)?;
         if hash != entry.hash {
-            stale_files.push(entry.filepath.clone());
+            stale_files.push(entry.clone());
         }
     }
 
@@ -138,6 +149,7 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
             if part.starts_with("--") {
                 match part.to_lowercase().as_str() {
                     "--split" => rule.rule_type = IndexRuleType::Split,
+                    "--code" => rule.rule_type = IndexRuleType::Code,
                     "--maxlength" => rule.rule_type = IndexRuleType::MaxLength,
                     "--minlength" => rule.rule_type = IndexRuleType::MinLength,
                     "--alphanumeric" => rule.rule_type = IndexRuleType::Alphanumeric,
@@ -194,6 +206,11 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
     Ok(rulesets)
 }
 
+struct ConfigEntry {
+    pub filepath: String,
+    pub meta: std::collections::HashSet<String>,
+}
+
 // current functionality is that it uses .gitignore files
 // to blacklist files that are under the directories
 // in the ledger config
@@ -211,29 +228,55 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     let config_ledger_path = config_path.join("ledger");
 
     let config_ledger = std::fs::read_to_string(&config_ledger_path)?;
-    let config_ledger = config_ledger
+    let mut config_ledger = config_ledger
         .lines()
         .filter(|line| {
             let parts: Vec<&str> = line.split_whitespace().filter(|s| !s.is_empty()).collect();
-            let cond = parts.len() == 1;
+            let cond = parts
+                .get(0)
+                .map_or(false, |path| std::path::Path::new(path).exists())
+                && parts.iter().skip(1).all(|&s| s.starts_with("--"));
+
             if !cond {
                 error!("Ignoring malformed ledger entry: {}", line);
             }
 
             cond
         })
-        .map(|line| line.to_string())
+        .map(|line| {
+            let parts = line
+                .split_whitespace()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<&str>>();
+            let filepath = parts[0];
+
+            let mut meta = std::collections::HashSet::new();
+            for part in parts.iter().skip(1) {
+                meta.insert(part.to_string());
+            }
+
+            ConfigEntry {
+                filepath: filepath.to_string(),
+                meta,
+            }
+        })
         .collect::<Vec<_>>();
 
+    let mut meta_index = 0;
     let mut config_entries = Vec::new();
-    for mut entry in config_ledger {
+    for config_entry in config_ledger.iter_mut() {
+        let entry = &mut config_entry.filepath;
         if entry.starts_with("#") {
             continue;
         }
 
         let path = std::path::Path::new(&entry);
         if path.is_dir() && (!entry.ends_with("*") || !entry.ends_with("**")) {
-            entry.push_str("/**/*");
+            if entry.ends_with("/") {
+                entry.push_str("**/*");
+            } else {
+                entry.push_str("/**/*");
+            }
         }
 
         info!("searching for files in {}", entry);
@@ -270,9 +313,22 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap()
                         .join(line);
 
-                    let full_path = match full_path.is_dir() {
-                        true => format!("{}/**/*", full_path.to_string_lossy()),
-                        false => full_path.to_string_lossy().to_string(),
+                    let is_dir = match glob::glob(&full_path.to_string_lossy().to_string()) {
+                        Ok(matches) => matches.peekable().peek().is_some(),
+                        Err(_) => false,
+                    } || full_path.is_dir();
+
+                    let full_path = full_path.to_string_lossy().to_string();
+
+                    let full_path = match is_dir {
+                        true => {
+                            if full_path.ends_with("/") {
+                                format!("{}**/*", full_path)
+                            } else {
+                                format!("{}/**/*", full_path)
+                            }
+                        }
+                        false => full_path,
                     };
                     gitignore_globs.push(full_path);
                 }
@@ -288,7 +344,6 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         if glob::Pattern::new(glob)
                             .unwrap()
                             .matches(f.to_str().unwrap())
-                            || f.to_str().unwrap().contains("pkg/mod")
                         {
                             return false;
                         }
@@ -301,8 +356,14 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         return false;
                     }
                 })
-                .map(|f| f.to_string_lossy().to_string()),
+                .map(|f| {
+                    let filepath = f.to_string_lossy().to_string();
+
+                    (filepath, meta_index)
+                }),
         );
+
+        meta_index += 1;
 
         info!("Kept {} files from {}", kept, entry);
         println!("Kept {} files from {}", kept, entry);
@@ -313,8 +374,9 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     let new_ledger = config_entries
         .into_iter()
         .map(|s| LedgerEntry {
-            filepath: s.clone(),
-            hash: get_hash(&s).unwrap(),
+            filepath: s.0.clone(),
+            hash: get_hash(&s.0).unwrap(),
+            meta: config_ledger[s.1].meta.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -328,7 +390,12 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(mut file) => {
             for entry in new_ledger {
-                writeln!(file, "{} {}", entry.filepath, entry.hash)?;
+                let mut meta_string = String::new();
+                for m in entry.meta {
+                    meta_string.push_str(&m[2..]);
+                }
+
+                writeln!(file, "{} {} {}", entry.filepath, entry.hash, meta_string)?;
             }
         }
         Err(e) => {

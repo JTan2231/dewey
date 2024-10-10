@@ -37,6 +37,56 @@ type Graph = HashMap<u64, Vec<(u64, f32)>>;
 
 const CACHE_SIZE: u32 = 20 * BLOCK_SIZE as u32;
 
+pub enum FilterComparator {
+    Equal,
+    NotEqual,
+}
+
+pub struct Filter {
+    pub comparator: FilterComparator,
+    pub value: String,
+}
+
+impl Filter {
+    pub fn from_string(input: &String) -> Result<Self, std::io::Error> {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        if parts.len() != 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Invalid filter format",
+            ));
+        }
+
+        let comparator = match parts[0] {
+            "eq" => FilterComparator::Equal,
+            "ne" => FilterComparator::NotEqual,
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid comparator",
+                ))
+            }
+        };
+
+        Ok(Filter {
+            comparator,
+            value: parts[1].to_string(),
+        })
+    }
+
+    pub fn compare(self: &Self, query: &str) -> bool {
+        match self.comparator {
+            FilterComparator::Equal => query == self.value,
+            FilterComparator::NotEqual => query != self.value,
+        }
+    }
+}
+
+pub struct Query {
+    pub embedding: Embedding,
+    pub filters: Vec<Filter>,
+}
+
 // basic in-memory nearest neighbor index
 // TODO: should we handle huge datasets, beyond what memory can hold?
 #[derive(Serialize)]
@@ -197,12 +247,16 @@ impl HNSW {
         })
     }
 
-    pub fn query(&self, query: &Embedding, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
+    // please god optimize this
+    pub fn query(&self, query: &Query, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
         if ef < k {
             panic!("ef must be greater than k");
         }
 
+        // there's gotta be a better way to blacklist
         let mut visited = vec![false; self.size as usize];
+        let mut blacklist = vec![false; self.size as usize];
+
         // frankly just a stupid way of using this instead of a min heap
         // but rust f32 doesn't have Eq so i don't know how to work with it
         let mut top_k: Vec<(u64, f32)> = Vec::new();
@@ -222,17 +276,32 @@ impl HNSW {
                     .unwrap()
                     .clone()
                     .into_iter()
-                    .filter(|(n, _)| !visited[*n as usize])
-                    .map(|(neighbor, _)| {
-                        let e_n = cache.get(neighbor as u32).unwrap();
-                        (neighbor, 1.0 - dot(query, &e_n))
+                    .filter_map(|(n, _)| {
+                        if blacklist[n as usize] {
+                            return None;
+                        }
+
+                        let e_n = cache.get(n as u32).unwrap();
+                        let mut filter_pass = true;
+                        for filter in query.filters.iter() {
+                            for meta in e_n.source_file.meta.iter() {
+                                filter_pass &= filter.compare(meta);
+                            }
+                        }
+
+                        if !visited[n as usize] && filter_pass {
+                            Some((n, 1.0 - dot(&query.embedding, &e_n)))
+                        } else {
+                            blacklist[n as usize] = true;
+                            None
+                        }
                     })
                     .collect::<Vec<_>>();
 
                 neighbors.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
                 for (neighbor, distance) in neighbors {
                     let neighbor = neighbor as usize;
-                    if !visited[neighbor] && count < ef {
+                    if !visited[neighbor] && !blacklist[neighbor] && count < ef {
                         top_k.push((neighbor as u64, distance));
 
                         stack.push(neighbor as u64);

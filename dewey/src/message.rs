@@ -1,11 +1,10 @@
-use crate::serialization::Serialize;
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeweyRequest {
+    pub query: String,
+    pub filters: Vec<String>,
+}
 
-use serialize_macros::Serialize;
-
-// TODO: message type enum for the serialization macros
-
-#[derive(Serialize)]
-pub struct Message {
-    pub message_type: String,
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeweyResponse {
     pub body: String,
 }

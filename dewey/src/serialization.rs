@@ -206,3 +206,34 @@ where
         Ok((map, total_size))
     }
 }
+
+impl<T: Serialize + std::hash::Hash + std::cmp::Eq> Serialize for std::collections::HashSet<T> {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let len = self.len() as u32;
+        bytes.extend(len.to_bytes());
+        for value in self.iter() {
+            bytes.extend(value.to_bytes());
+        }
+
+        bytes
+    }
+
+    fn from_bytes(bytes: &[u8], mut cursor: usize) -> Result<(Self, usize), std::io::Error> {
+        let (len, count) = u32::from_bytes(bytes, cursor)?;
+        cursor += count;
+
+        let len = len as usize;
+        let mut values = std::collections::HashSet::new();
+        let mut total_size = count;
+        for _ in 0..len {
+            let (value, count) = T::from_bytes(bytes, cursor)?;
+            cursor += count;
+            total_size += count;
+
+            values.insert(value);
+        }
+
+        Ok((values, total_size))
+    }
+}
