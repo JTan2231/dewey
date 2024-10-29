@@ -1,6 +1,6 @@
-# Dewey - A simple document retrieval system
+# Dewey
 
-Dewey is a lightweight document retrieval system that uses OpenAI embeddings to find similar documents based on their content.
+Dewey is a local LLM embedding index named after the Dewey Decimal System.
 
 ## Examples
 
@@ -23,17 +23,10 @@ dewey "How to train a language model"
 
 ## Installation
 
-1. **Install Rust:**
-   - If you haven't already, download and install the Rust toolchain from [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
-2. **Clone the repository:**
-   - Clone the Dewey repository: `git clone https://github.com/JoeyDeVries/dewey`
-3. **Build the project:**
-   - Navigate to the project directory: `cd dewey`
-   - Build the project: `cargo build`
-4. **Run the Dewey server:**
-   - Run the server: `cargo run --features server`
-5. **Run the Dewey CLI:**
-   - Run the CLI: `cargo run --features cli`
+1. `git clone https://github.com/JTan2231/dewey`
+2. `cargo build`
+3. `cargo run --features server`
+4. `cargo run --features cli`
 
 ## Usage
 
@@ -55,12 +48,10 @@ extension --rule_type value --rule_type value ...
 **Example:**
 
 ```
-rs --split "
-" --minlength 10
+rs --split "\n" --minlength 10
 ```
 
-This rule applies to `.rs` files and splits them based on newline characters (`
-`). It then filters out any chunks that are less than 10 characters long.
+This rule applies to `.rs` files and splits them based on newline characters (`\n`). It then filters out any chunks that are less than 10 characters long.
 
 **Ledger Configuration**
 
