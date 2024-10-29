@@ -100,10 +100,3 @@ The Dewey CLI provides several commands for managing Dewey:
 - **`dewey -s -e`:** Synchronize the ledger and embed missing items.
 - **`dewey "How to train a language model" --filter language,rust`:** Search for documents similar to "How to train a language model" that are tagged with "rust".
 
-## Contributing
-
-Contributions are welcome! Please feel free to open issues or submit pull requests.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for details.
