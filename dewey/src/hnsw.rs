@@ -248,6 +248,9 @@ impl HNSW {
     }
 
     // please god optimize this
+    // is this better than bfs?
+    //
+    // dfs search through the hnsw
     pub fn query(&self, query: &Query, k: usize, ef: usize) -> Vec<(Box<Embedding>, f32)> {
         if ef < k {
             panic!("ef must be greater than k");

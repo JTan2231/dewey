@@ -6,19 +6,22 @@ use std::thread;
 use dewey_lib::config;
 use dewey_lib::hnsw::{Filter, Query, HNSW};
 use dewey_lib::logger::Logger;
-use dewey_lib::message::{DeweyRequest, DeweyResponse};
+use dewey_lib::message::{DeweyRequest, DeweyResponse, DeweyResponseItem};
 use dewey_lib::openai::{embed, EmbeddingSource};
-use dewey_lib::parsing::read_source;
 use dewey_lib::serialization::Serialize;
 use dewey_lib::{error, info};
 
 fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), std::io::Error> {
-    let mut buffer = [0; 8192];
-    stream.read(&mut buffer).unwrap();
-    let buffer = String::from_utf8_lossy(&buffer).to_string();
-    let buffer = buffer.trim_matches('\0');
+    let mut size_buffer = [0u8; 4];
+    stream.read_exact(&mut size_buffer).unwrap();
+    let message_size = u32::from_be_bytes(size_buffer) as usize;
 
-    let message: DeweyRequest = match serde_json::from_str(&buffer) {
+    let mut buffer = vec![0u8; message_size];
+    stream.read_exact(&mut buffer).unwrap();
+
+    let request = String::from_utf8_lossy(&buffer);
+
+    let message: DeweyRequest = match serde_json::from_str(&request) {
         Ok(msg) => msg,
         Err(e) => {
             error!("Failed to parse request: {}", e);
@@ -54,21 +57,24 @@ fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), s
     let query = Query { embedding, filters };
 
     #[allow(unused_assignments)]
-    let mut index_result = String::new();
+    let mut index_results = Vec::new();
     {
         let index = index.lock().unwrap();
-        let result = index.query(&query, 1, 200);
+        let result = index.query(&query, message.k, 200);
 
-        index_result = match read_source(&result[0].0.source_file) {
-            Ok(content) => content,
-            Err(e) => {
-                error!("Failed to read source file: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-            }
-        }
+        index_results.extend(result.iter().map(|p| DeweyResponseItem {
+            filepath: p.0.source_file.filepath.clone(),
+            subset: match p.0.source_file.subset {
+                Some(s) => s,
+                None => (0, 0),
+            },
+        }));
     }
 
-    let response = DeweyResponse { body: index_result };
+    let response = DeweyResponse {
+        results: index_results,
+    };
+
     let response = match serde_json::to_string(&response) {
         Ok(serialized_response) => serialized_response,
         Err(e) => {

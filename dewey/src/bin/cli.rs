@@ -75,20 +75,23 @@ fn parse_flags() -> Flags {
 }
 
 fn man() {
-    println!("Usage: dewey [-sefrhb] [query]");
-    println!("\nFlags:");
-    println!("\t-s: Sync ledger with config");
-    println!("\t-e: Embed missing items in ledger");
-    println!("\t-f: Embed all items in ledger");
-    println!("\t-r: Reindex embeddings");
-    println!("\t-h: Print this help message");
-    println!("\t-b: Reblock embeddings");
-    println!("\nQuery:");
-    println!("\tQuery to send to the server");
-    println!("\nExamples:");
-    println!("\tdewey -ser");
-    println!("\tdewey -serb");
-    println!("\tdewey -sfrb \"query\"");
+    println!("Dewey - A simple document retrieval system");
+    println!("Usage: dewey [OPTIONS] [QUERY]");
+    println!("");
+    println!("Options:");
+    println!("  -s        Synchronize the ledger with the configuration");
+    println!("  -e        Embed missing items in the ledger");
+    println!("  -f        Embed all items in the ledger (re-embed)");
+    println!("  -r        Reindex embeddings");
+    println!("  -b        Reblock embeddings");
+    println!("  -h        Print this help message");
+    println!("");
+    println!("Arguments:");
+    println!("");
+    println!("Examples:");
+    println!("  dewey -s                Synchronize the ledger");
+    println!("  dewey -e                Embed missing items");
+    println!("  dewey -r                Reindex the embeddings");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -124,42 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if no_flags {
-        if flags.query.is_empty() {
-            println!("No flags or query provided, nothing to do");
-            info!("No flags or query provided, nothing to do");
-            return Ok(());
-        }
-
-        let mut stream = std::net::TcpStream::connect("127.0.0.1:5051")?;
-
-        let message = DeweyRequest {
-            query: flags.query,
-            filters: flags.query_filters,
-        };
-
-        let message_bytes = serde_json::to_string(&message)?.into_bytes();
-        stream.write(&message_bytes)?;
-        stream.flush()?;
-
-        let mut length_bytes = [0u8; 4];
-        stream.read_exact(&mut length_bytes)?;
-        let length = u32::from_be_bytes(length_bytes) as usize;
-
-        let mut buffer = vec![0u8; length];
-        stream.read_exact(&mut buffer)?;
-        let buffer = String::from_utf8_lossy(&buffer);
-
-        let response: DeweyResponse = match serde_json::from_str(&buffer) {
-            Ok(resp) => resp,
-            Err(e) => {
-                error!("Failed to parse response: {}", e);
-                error!("buffer: {:?}", buffer);
-                return Err(e.into());
-            }
-        };
-
-        info!("Received response: {}", response.body);
-        println!("\n{}\n", response.body);
+        println!("No flags provided, nothing to do");
+        info!("No flags provided, nothing to do");
+        return Ok(());
     }
 
     Ok(())
