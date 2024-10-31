@@ -11,6 +11,41 @@ use dewey_lib::openai::{embed, EmbeddingSource};
 use dewey_lib::serialization::Serialize;
 use dewey_lib::{error, info};
 
+struct Flags {
+    address: String,
+    port: usize,
+}
+
+fn parse_flags() -> Flags {
+    let args: Vec<String> = std::env::args().collect();
+    let mut flags = Flags {
+        address: String::from("127.0.0.1"),
+        port: 5050,
+    };
+
+    if args.len() < 1 {
+        std::process::exit(1);
+    }
+
+    for (i, arg) in args.iter().skip(1).enumerate() {
+        if arg.starts_with("-") && !arg.starts_with("--") {
+            for c in arg.chars().skip(1) {
+                match c {
+                    'a' => {
+                        flags.address = args[i + 2].clone();
+                    }
+                    'p' => {
+                        flags.port = args[i + 2].parse().unwrap();
+                    }
+                    _ => panic!("error: unknown flag: {}", c),
+                }
+            }
+        }
+    }
+
+    flags
+}
+
 fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), std::io::Error> {
     let mut size_buffer = [0u8; 4];
     stream.read_exact(&mut size_buffer).unwrap();
@@ -103,9 +138,11 @@ fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), s
 
 pub fn main() -> std::io::Result<()> {
     config::setup();
+    let flags = parse_flags();
 
-    let listener = TcpListener::bind("127.0.0.1:5051").unwrap();
-    info!("Server listening on port 5051");
+    let listener = TcpListener::bind(format!("{}:{}", flags.address, flags.port)).unwrap();
+    info!("Server listening on {}:{}", flags.address, flags.port);
+    println!("Server listening on {}:{}", flags.address, flags.port);
 
     let index = Arc::new(Mutex::new(HNSW::new(false)?));
 
