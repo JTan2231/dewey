@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/serialize_macros",
+    "crates/api"
+]
