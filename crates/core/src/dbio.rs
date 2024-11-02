@@ -72,6 +72,7 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
     };
 
     let mut embeddings = embed_bulk(&stale_sources)?;
+
     for (i, e) in embeddings.iter_mut().enumerate() {
         e.id = i as u64;
     }
