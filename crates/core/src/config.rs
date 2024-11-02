@@ -22,15 +22,19 @@ fn touch_file(path: &std::path::PathBuf) {
 }
 
 pub fn get_home_dir() -> std::path::PathBuf {
-    match std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .or_else(|_| {
-            std::env::var("HOMEDRIVE").and_then(|homedrive| {
-                std::env::var("HOMEPATH").map(|homepath| format!("{}{}", homedrive, homepath))
-            })
-        }) {
-        Ok(dir) => std::path::PathBuf::from(dir),
-        Err(_) => panic!("Failed to get home directory"),
+    if cfg!(test) {
+        std::env::temp_dir().join("dewey_testing")
+    } else {
+        match std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .or_else(|_| {
+                std::env::var("HOMEDRIVE").and_then(|homedrive| {
+                    std::env::var("HOMEPATH").map(|homepath| format!("{}{}", homedrive, homepath))
+                })
+            }) {
+            Ok(dir) => std::path::PathBuf::from(dir),
+            Err(_) => panic!("Failed to get home directory"),
+        }
     }
 }
 
@@ -63,18 +67,18 @@ pub fn setup() {
     let config_path = get_config_dir();
     let local_path = get_local_dir();
     let data_path = get_data_dir();
-
     let logging_path = local_path.join("logs");
-    crate::logger::Logger::init(format!(
-        "{}/{}.log",
-        logging_path.to_str().unwrap(),
-        now.clone()
-    ));
 
     create_if_nonexistent(&local_path);
     create_if_nonexistent(&config_path);
     create_if_nonexistent(&logging_path);
     create_if_nonexistent(&data_path);
+
+    crate::logger::Logger::init(format!(
+        "{}/{}.log",
+        logging_path.to_str().unwrap(),
+        now.clone()
+    ));
 
     touch_file(&local_path.join("ledger"));
     touch_file(&config_path.join("ledger"));

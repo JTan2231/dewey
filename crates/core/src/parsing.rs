@@ -146,6 +146,7 @@ struct FunctionDefinition {
     pub end: usize,
 }
 
+// TODO: other languages here
 #[allow(unused_assignments)]
 fn function_split(
     source: &EmbeddingSource,

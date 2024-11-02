@@ -6,17 +6,6 @@ use std::io::{BufRead, Write};
 use crate::logger::Logger;
 use crate::{error, info};
 
-const WHITELIST: &[&str] = &[
-    "c", "cpp", "cxx", "h", "hpp", "java", "class", "py", "pyw", "pyx", "js", "jsx", "ts", "tsx",
-    "rb", "erb", "php", "phtml", "cs", "go", "rs", "swift", "kt", "kts", "scala", "sc", "html",
-    "htm", "css", "sass", "scss", "sh", "bash", "zsh", "pl", "pm", "lua", "hs", "lhs", "lisp",
-    "cl", "el", "dart", "r", "R", "jl", "groovy", "m", "mm", "asm", "s", "f", "for", "f90", "f95",
-    "vb", "bas", "erl", "hrl", "ada", "adb", "ads", "clj", "cljs", "cljc", "fs", "fsx", "cob",
-    "cbl", "pas", "pp", "pro", "scm", "ss", "tcl", "v", "vh", "vhd", "vhdl", "xml", "md",
-    "markdown", "ipynb", "ps1", "psm1", "psd1", "bat", "cmd", "elm", "ex", "exs", "ml", "mli",
-    "mat", "sql", "txt", "txtl", "txtp",
-];
-
 // TODO: there needs to be better delineation on the different rule types
 //       Currently, MinLength and Alphanumeric act as filters,
 //       while the rest act as splitting rules.
@@ -29,6 +18,55 @@ pub enum IndexRuleType {
     MinLength,
     MaxLength,
     Alphanumeric,
+}
+
+impl IndexRuleType {
+    pub fn validate(&self, value: &str) -> bool {
+        match self {
+            IndexRuleType::MinLength => {
+                if value.parse::<usize>().is_err() {
+                    error!("Ignoring invalid min length value: {}", value);
+                    false
+                } else {
+                    true
+                }
+            }
+            IndexRuleType::MaxLength => {
+                if value.parse::<usize>().is_err() {
+                    error!("Ignoring invalid max length value: {}", value);
+                    false
+                } else {
+                    true
+                }
+            }
+            IndexRuleType::Alphanumeric => {
+                if value.to_lowercase() != "true" && value.to_lowercase() != "false" {
+                    error!("Ignoring invalid alphanumeric value: {}", value);
+                    false
+                } else {
+                    true
+                }
+            }
+            IndexRuleType::Split => {
+                if value.len() == 0 {
+                    error!("Ignoring invalid empty split value");
+                    false
+                } else {
+                    true
+                }
+            }
+
+            IndexRuleType::Code => {
+                if value.to_lowercase() != "function" {
+                    error!("Ignoring invalid code value: {}", value);
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -61,15 +99,13 @@ pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
             .get(0)
             .map_or(false, |path| std::path::Path::new(path).exists())
         {
-            let mut meta = std::collections::HashSet::new();
-            for part in parts.iter().skip(1) {
-                meta.insert(part.to_string());
-            }
-
             entries.push(LedgerEntry {
                 filepath: parts[0].to_string(),
                 hash: parts[1].to_string(),
-                meta,
+                meta: parts[2]
+                    .split(",")
+                    .map(|s| s.to_string())
+                    .collect::<std::collections::HashSet<String>>(),
             });
         } else {
             panic!("Malformed ledger entry: {:?}", parts);
@@ -93,16 +129,6 @@ pub fn get_stale_files() -> Result<Vec<LedgerEntry>, std::io::Error> {
     }
 
     Ok(stale_files)
-}
-
-fn is_whitelisted(path: &str) -> bool {
-    for ext in WHITELIST {
-        if path.ends_with(format!(".{}", ext).as_str()) {
-            return true;
-        }
-    }
-
-    false
 }
 
 fn get_hash(filepath: &String) -> Result<String, std::io::Error> {
@@ -148,8 +174,8 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
         for part in parts.iter().skip(1) {
             if part.starts_with("--") {
                 match part.to_lowercase().as_str() {
-                    "--split" => rule.rule_type = IndexRuleType::Split,
                     "--code" => rule.rule_type = IndexRuleType::Code,
+                    "--split" => rule.rule_type = IndexRuleType::Split,
                     "--maxlength" => rule.rule_type = IndexRuleType::MaxLength,
                     "--minlength" => rule.rule_type = IndexRuleType::MinLength,
                     "--alphanumeric" => rule.rule_type = IndexRuleType::Alphanumeric,
@@ -166,29 +192,8 @@ pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::
                     .replace("\\t", "\t")
                     .replace("\\r", "\r");
 
-                // value validation
-                match rule.rule_type {
-                    IndexRuleType::MinLength => {
-                        if rule.value.parse::<usize>().is_err() {
-                            error!("Ignoring invalid min length value: {}", rule.value);
-                            continue;
-                        }
-                    }
-                    IndexRuleType::MaxLength => {
-                        if rule.value.parse::<usize>().is_err() {
-                            error!("Ignoring invalid max length value: {}", rule.value);
-                            continue;
-                        }
-                    }
-                    IndexRuleType::Alphanumeric => {
-                        if rule.value.to_lowercase() != "true"
-                            && rule.value.to_lowercase() != "false"
-                        {
-                            error!("Ignoring invalid alphanumeric value: {}", rule.value);
-                            continue;
-                        }
-                    }
-                    _ => (),
+                if !rule.rule_type.validate(&rule.value) {
+                    continue;
                 }
 
                 rules.push(rule);
@@ -287,12 +292,14 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>();
 
         // there has to be a better way of dealing with go pkg directories than this
-        let mut gitignore_globs = vec!["pkg/mod/**/*".to_string()];
+        let mut gitignore_globs = Vec::new();
         for file in directory.iter() {
             if file.ends_with(".gitignore") {
                 let gitignore = file.clone();
                 let file = std::fs::File::open(&gitignore)?;
                 let reader = std::io::BufReader::new(file);
+
+                let root = std::path::Path::new(&gitignore).parent().unwrap();
                 for line in reader.lines() {
                     let line = line?;
                     if line.starts_with("#") || line.is_empty() {
@@ -308,13 +315,9 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         None => line.as_str(),
                     };
 
-                    let full_path = std::path::Path::new(&gitignore)
-                        .parent()
-                        .unwrap()
-                        .join(line);
-
+                    let full_path = root.join(line);
                     let is_dir = match glob::glob(&full_path.to_string_lossy().to_string()) {
-                        Ok(matches) => matches.peekable().peek().is_some(),
+                        Ok(matches) => matches.peekable().any(|m| m.is_ok() && m.unwrap().is_dir()),
                         Err(_) => false,
                     } || full_path.is_dir();
 
@@ -330,8 +333,12 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         false => full_path,
                     };
+
                     gitignore_globs.push(full_path);
                 }
+
+                gitignore_globs.push(root.join(".gitignore").to_string_lossy().to_string());
+                gitignore_globs.push(root.join(".git/**/*").to_string_lossy().to_string());
             }
         }
 
@@ -349,7 +356,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if is_whitelisted(f.to_str().unwrap()) {
+                    if f.is_file() {
                         kept += 1;
                         return true;
                     } else {
@@ -391,10 +398,15 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         Ok(mut file) => {
             for entry in new_ledger {
                 let mut meta_string = String::new();
-                for m in entry.meta {
-                    meta_string.push_str(&m[2..]);
+                for (i, m) in entry.meta.iter().enumerate() {
+                    if i < entry.meta.len() - 1 {
+                        meta_string.push_str(&format!("{},", &m[2..]));
+                    } else {
+                        meta_string.push_str(&m[2..]);
+                    }
                 }
 
+                meta_string = meta_string.trim().to_string();
                 writeln!(file, "{} {} {}", entry.filepath, entry.hash, meta_string)?;
             }
         }
@@ -404,4 +416,277 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! create_dir {
+        ($path:expr) => {
+            match std::fs::create_dir_all($path) {
+                Ok(_) => {}
+                Err(e) => panic!("Failed to create directory: {:?}, {}", $path, e),
+            }
+        };
+    }
+
+    macro_rules! create_file {
+        ($path:expr) => {
+            match std::fs::File::create($path) {
+                Ok(_) => {}
+                Err(e) => panic!("Failed to create file: {:?}, {}", $path, e),
+            }
+        };
+    }
+
+    macro_rules! write_file {
+        ($path:expr, $contents:expr) => {
+            match std::fs::write($path, $contents) {
+                Ok(_) => {}
+                Err(e) => panic!("Failed to write to file: {:?}, {}", $path, e),
+            }
+        };
+    }
+
+    struct Cleanup;
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(crate::config::get_home_dir()).unwrap()
+        }
+    }
+
+    // TODO: better organization to account for varying meta lengths etc.?
+
+    fn get_tracked_files() -> Vec<String> {
+        vec![
+            "a.rs".to_string(),
+            "b.rs".to_string(),
+            "c.rs".to_string(),
+            "src/e.rs".to_string(),
+        ]
+    }
+
+    fn get_untracked_files() -> Vec<String> {
+        vec![
+            "d.md".to_string(),
+            "src/f.md".to_string(),
+            "ignore/g.rs".to_string(),
+            "ignore/h.rs".to_string(),
+        ]
+    }
+
+    fn get_meta() -> Vec<String> {
+        vec![
+            "rust".to_string(),
+            "code".to_string(),
+            "tracked".to_string(),
+        ]
+    }
+
+    fn setup() -> Result<(), std::io::Error> {
+        println!("===BEGIN SETUP===");
+        crate::config::setup();
+        let root = crate::config::get_home_dir();
+        let config = crate::config::get_config_dir();
+
+        let target = root.join("test_repo");
+
+        let ledger_contents = vec![format!(
+            "{} {}",
+            target.to_str().unwrap(),
+            get_meta()
+                .iter()
+                .map(|m| format!("--{}", m))
+                .collect::<Vec<String>>()
+                .join(" ")
+        )]
+        .join("\n");
+
+        write_file!(config.join("ledger"), ledger_contents.clone());
+        println!("set ledger with:\n{}\n", ledger_contents);
+
+        let rule_contents = vec![
+            "* --minlength 128 --maxlength 512 --alphanumeric true",
+            "rs --code function",
+            "md --split \\n",
+        ]
+        .join("\n");
+
+        write_file!(config.join("rules"), rule_contents.clone());
+        println!("set rules with:\n{}\n", rule_contents);
+
+        create_dir!(target.join(".git"));
+        create_file!(target.join(".git").join("whatever"));
+
+        let tracked_files = get_tracked_files();
+        let untracked_files = get_untracked_files();
+
+        create_dir!(target.join("src"));
+        create_dir!(target.join("ignore"));
+
+        for tf in tracked_files.iter() {
+            write_file!(target.join(tf), "a");
+        }
+
+        for utf in untracked_files.iter() {
+            write_file!(target.join(utf), "b");
+        }
+
+        // ignore folder with a variety of files inside
+
+        let gitignore_contents = "*.md\n/ignore";
+        write_file!(target.join(".gitignore"), gitignore_contents);
+        println!(
+            "set {} with:\n{}\n",
+            target.join(".gitignore").to_str().unwrap(),
+            gitignore_contents
+        );
+
+        println!("===END SETUP===\n");
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_ruleset_test() {
+        let _cleanup = Cleanup;
+
+        assert!(setup().is_ok());
+
+        let rules = get_indexing_rules();
+        assert!(rules.is_ok());
+
+        let rules = rules.unwrap();
+
+        // should really check the values themselves here but i'm too lazy to think through a
+        // framework for doing so
+        assert!(rules.contains_key("*"));
+        assert!(rules.get("*").unwrap().len() == 3);
+
+        assert!(rules.contains_key("rs"));
+        assert!(rules.get("rs").unwrap().len() == 1);
+
+        assert!(rules.contains_key("md"));
+        assert!(rules.get("md").unwrap().len() == 1);
+    }
+
+    #[test]
+    fn read_ledger_test() {
+        let _cleanup = Cleanup;
+
+        assert!(setup().is_ok());
+        assert!(sync_ledger_config().is_ok());
+
+        let entries = read_ledger();
+        assert!(entries.is_ok());
+
+        let tracked_files = get_tracked_files();
+        let entries = entries.unwrap();
+
+        for entry in entries.iter() {
+            println!("looking for filepath {}", entry.filepath);
+            assert!(tracked_files.iter().any(|tf| entry.filepath.contains(tf)));
+
+            let mut meta_set = get_meta()
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>();
+
+            for m in entry.meta.iter() {
+                println!("looking for meta {}", m);
+                assert!(meta_set.remove(m));
+            }
+        }
+    }
+
+    // checking whether the tracked files are added to a fresh ledger
+    // and unchecked files are not added
+    #[test]
+    fn sync_ledger_config_new() {
+        let _cleanup = Cleanup;
+
+        assert!(setup().is_ok());
+        assert!(sync_ledger_config().is_ok());
+
+        let ledger_path = crate::config::get_local_dir().join("ledger");
+
+        let ledger_result = std::fs::read_to_string(ledger_path);
+        assert!(ledger_result.is_ok());
+
+        let contents = ledger_result.unwrap();
+        let lines = contents
+            .split("\n")
+            .filter(|l| l.len() > 0)
+            .collect::<Vec<&str>>();
+
+        println!("local ledger contents:\n{}", contents);
+
+        let tracked_files = get_tracked_files();
+        assert_eq!(lines.len(), tracked_files.len());
+
+        for line in lines {
+            let items = line.split(" ").collect::<Vec<&str>>();
+            assert_eq!(items.len(), 3);
+
+            assert!(tracked_files.iter().any(|f| items[0].contains(f)));
+        }
+    }
+
+    // tests updating an existing ledger to include new files
+    #[test]
+    fn sync_ledger_config_update_new() {
+        let _cleanup = Cleanup;
+
+        assert!(setup().is_ok());
+        assert!(sync_ledger_config().is_ok());
+
+        let new_files = vec![
+            crate::config::get_home_dir()
+                .join("test_repo")
+                .join("new_rs.rs"),
+            crate::config::get_home_dir()
+                .join("test_repo")
+                .join("no_extension"),
+            crate::config::get_home_dir() // untracked .md file
+                .join("test_repo")
+                .join("new_md.md"),
+        ];
+
+        for nf in new_files.iter() {
+            write_file!(nf, "testing");
+            println!("wrote file {}", nf.to_str().unwrap());
+        }
+
+        assert!(sync_ledger_config().is_ok());
+
+        let ledger_path = crate::config::get_local_dir().join("ledger");
+
+        let ledger_result = std::fs::read_to_string(ledger_path);
+        assert!(ledger_result.is_ok());
+
+        let contents = ledger_result.unwrap();
+        let lines = contents
+            .split("\n")
+            .filter(|l| l.len() > 0)
+            .collect::<Vec<&str>>();
+
+        println!("local ledger contents:\n{}", contents);
+
+        let mut tracked_files = new_files
+            .iter()
+            .map(|nf| nf.to_string_lossy().to_string())
+            .filter(|nf| !nf.ends_with(".md"))
+            .collect::<Vec<String>>();
+
+        tracked_files.extend(get_tracked_files());
+        assert_eq!(lines.len(), tracked_files.len());
+
+        for line in lines {
+            let items = line.split(" ").collect::<Vec<&str>>();
+            assert_eq!(items.len(), 3);
+
+            assert!(tracked_files.iter().any(|f| items[0].contains(f)));
+        }
+    }
 }
