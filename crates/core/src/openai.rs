@@ -262,15 +262,12 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
                         }
                         Err(e) => {
                             error!("Failed to embed batch {}: {:?}", batch.len(), e);
-                            return Err(e);
+                            continue;
                         }
                     };
-
-                    thread::sleep(std::time::Duration::from_millis(500));
                 }
                 Err(_) => {
                     info!("Thread {} exiting", i);
-                    return Ok(());
                 }
             }
         });
@@ -279,14 +276,27 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
     }
 
     info!("working through {} batches", batches.len());
+
+    // TODO: figure out a process for dealing with failed batches
+    let mut retries = 0;
     for batch in batches.iter() {
-        tx.send(batch.clone()).unwrap();
+        while let Err(e) = tx.send(batch.clone()) {
+            error!("failed to send batch: {}", e);
+
+            // arbitrary limit
+            if retries >= 5 {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            retries += 1;
+        }
     }
 
     drop(tx);
 
     for thread in thread_pool {
-        thread.join().unwrap()?;
+        thread.join().unwrap();
     }
 
     let embeddings = Arc::try_unwrap(embeddings).unwrap().into_inner().unwrap();
