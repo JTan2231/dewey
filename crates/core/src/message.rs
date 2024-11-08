@@ -1,13 +1,20 @@
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct QueryRequest {
-    pub k: usize,
-    pub query: String,
-    pub filters: Vec<String>,
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct DeweyRequest {
+    pub message_type: String,
+    pub payload: RequestPayload,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct EditRequest {
-    pub filepath: String,
+#[serde(untagged)]
+pub enum RequestPayload {
+    Query {
+        k: usize,
+        query: String,
+        filters: Vec<String>,
+    },
+    Edit {
+        filepath: String,
+    },
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

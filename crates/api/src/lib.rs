@@ -5,7 +5,7 @@ use dewey_lib::logger::Logger;
 
 pub use dewey_lib::message;
 
-struct DeweyClient {
+pub struct DeweyClient {
     pub address: String,
     pub port: u32,
 }
@@ -15,19 +15,11 @@ impl DeweyClient {
         Self { address, port }
     }
 
-    pub fn query(
+    fn send(
         &self,
-        request: String,
-        k: usize,
-        filters: Vec<String>,
+        message: message::DeweyRequest,
     ) -> Result<message::DeweyResponse, std::io::Error> {
         let mut stream = std::net::TcpStream::connect(format!("{}:{}", self.address, self.port))?;
-
-        let message = message::QueryRequest {
-            query: request,
-            k,
-            filters,
-        };
 
         let message_bytes = serde_json::to_string(&message)?.into_bytes();
         stream.write(&message_bytes)?;
@@ -49,5 +41,32 @@ impl DeweyClient {
                 return Err(e.into());
             }
         }
+    }
+
+    pub fn query(
+        &self,
+        request: String,
+        k: usize,
+        filters: Vec<String>,
+    ) -> Result<message::DeweyResponse, std::io::Error> {
+        let message = message::DeweyRequest {
+            message_type: "query".to_string(),
+            payload: message::RequestPayload::Query {
+                query: request,
+                k,
+                filters,
+            },
+        };
+
+        self.send(message)
+    }
+
+    pub fn reindex(&self, filepath: String) -> Result<message::DeweyResponse, std::io::Error> {
+        let message = message::DeweyRequest {
+            message_type: "edit".to_string(),
+            payload: message::RequestPayload::Edit { filepath },
+        };
+
+        self.send(message)
     }
 }
