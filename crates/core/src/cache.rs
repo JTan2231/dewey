@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::config;
-use crate::dbio::{EmbeddingBlock, BLOCK_SIZE};
+use crate::dbio::{get_directory, read_embedding_block, BLOCK_SIZE};
 use crate::logger::Logger;
 use crate::openai::Embedding;
 use crate::{error, info};
@@ -210,13 +209,18 @@ pub struct EmbeddingCache {
     node_map: HashMap<u32, NonNull<Node<u32>>>,
     embeddings: HashMap<u32, Embedding>,
     directory: HashMap<u32, u64>,
+
+    // used to keep track of which embeddings are invalid from file updates
+    // dirty embeddings are accounted for and removed on cache reads
+    dirty_embeddings: HashSet<u32>,
+
     // ideally this is some multiple of the number of embeddings in a block
     // this _must_ be greater or equal to the number of embeddings in a block
     max_size: u32,
 }
 
 impl EmbeddingCache {
-    pub fn new(max_size: u32) -> Self {
+    pub fn new(max_size: u32) -> Result<Self, std::io::Error> {
         info!("initializing embedding cache with max size {}", max_size);
 
         if max_size < BLOCK_SIZE as u32 {
@@ -227,61 +231,81 @@ impl EmbeddingCache {
             panic!("max_size must be greater than or equal to the number of embeddings in a block");
         }
 
-        let directory_path = format!("{}/directory", config::get_data_dir().to_str().unwrap());
-        let directory = std::fs::read_to_string(directory_path)
-            .expect("failed to read directory")
-            .lines()
-            .map(|line| {
-                let mut parts = line.split_whitespace();
-                let embedding_id = parts.next().unwrap().parse::<u32>().unwrap();
-                let block_number = parts.next().unwrap().parse::<u64>().unwrap();
-                (embedding_id, block_number)
-            })
-            .collect::<HashMap<_, _>>();
+        let directory = get_directory()?;
 
-        EmbeddingCache {
+        Ok(EmbeddingCache {
             lru: LinkedList::new(),
             node_map: HashMap::new(),
             embeddings: HashMap::new(),
-            directory,
+            dirty_embeddings: HashSet::new(),
+            directory: directory.id_map,
             max_size,
+        })
+    }
+
+    fn load_embedding_block(&mut self, embedding_id: u32) -> Result<(), std::io::Error> {
+        let block_number = match self.directory.get(&embedding_id) {
+            Some(block_number) => *block_number,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("embedding {} not found in directory", embedding_id),
+                ))
+            }
+        };
+
+        let embeddings = read_embedding_block(block_number)?.embeddings;
+        for e in embeddings {
+            if self.lru.len >= self.max_size as usize {
+                let popped = self.lru.pop_back().unwrap();
+                self.embeddings.remove(&popped);
+                self.node_map.remove(&popped);
+            }
+
+            let id = e.id as u32;
+            if let Some(node) = self.node_map.get(&id) {
+                unsafe {
+                    (*node.as_ptr()).detach();
+                    self.lru.len -= 1;
+                }
+            }
+
+            let new_node = self.lru.push_front(id);
+            self.embeddings.insert(id, e);
+            self.node_map.insert(id, new_node);
         }
+
+        Ok(())
     }
 
     // embedding ids _should_ always be present
     // unless they're not indexed, in which we'd find an io error
     //
+    // embeddings are loaded in blocks
+    // querying an embedding that's not currently cached will load the entire block into memory
+    //
     // cloning the embeddings isn't ideal
     // but neither is the borrow checker
     pub fn get(&mut self, embedding_id: u32) -> Result<Box<Embedding>, std::io::Error> {
+        // fetch the embedding
         let embedding = match self.embeddings.get(&embedding_id).cloned() {
-            Some(embedding) => embedding,
-            None => {
-                let embeddings = self.get_embeddings(embedding_id)?;
-                for e in embeddings {
-                    if self.lru.len >= self.max_size as usize {
-                        let popped = self.lru.pop_back().unwrap();
-                        self.embeddings.remove(&popped);
-                        self.node_map.remove(&popped);
-                    }
+            Some(embedding) => {
+                if self.dirty_embeddings.contains(&embedding_id) {
+                    self.load_embedding_block(embedding_id)?;
+                    self.dirty_embeddings.remove(&embedding_id);
 
-                    let id = e.id as u32;
-                    if let Some(node) = self.node_map.get(&id) {
-                        unsafe {
-                            (*node.as_ptr()).detach();
-                            self.lru.len -= 1;
-                        }
-                    }
-
-                    let new_node = self.lru.push_front(id);
-                    self.embeddings.insert(id, e);
-                    self.node_map.insert(id, new_node);
+                    self.embeddings.get(&embedding_id).unwrap().clone()
+                } else {
+                    embedding
                 }
-
+            }
+            None => {
+                self.load_embedding_block(embedding_id)?;
                 self.embeddings.get(&embedding_id).unwrap().clone()
             }
         };
 
+        // move the LRU node
         let node = self.node_map.get(&embedding_id).unwrap();
         unsafe {
             let new_node = self.lru.push_front(embedding_id);
@@ -300,31 +324,5 @@ impl EmbeddingCache {
         });
 
         Ok(Box::new(embedding))
-    }
-
-    // loads all embeddings in a block
-    // based on a contained embedding id
-    // this adds/replaces the bottom k embeddings in the lru
-    // if we're at capacity
-    fn get_embeddings(&self, embedding_id: u32) -> Result<Vec<Embedding>, std::io::Error> {
-        let block_number = match self.directory.get(&embedding_id) {
-            Some(block_number) => *block_number,
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("embedding {} not found in directory", embedding_id),
-                ))
-            }
-        };
-
-        let filename = format!(
-            "{}/{}",
-            config::get_data_dir().to_str().unwrap(),
-            block_number
-        );
-
-        let block = EmbeddingBlock::from_file(&filename, block_number)?;
-
-        Ok(block.embeddings)
     }
 }

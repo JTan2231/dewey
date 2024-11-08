@@ -48,7 +48,7 @@ fn separator_split(
     let mut chunks = Vec::new();
     let mut chunk = String::new();
     let mut i = 0;
-    while i < chars.len() - separator.len() {
+    while i < chars.len() {
         let window = String::from_iter(&chars[i..i + separator.len()]);
         if window == *separator || chunk.len() >= TOKEN_LIMIT {
             chunks.push((chunk.clone(), (i - chunk.len(), i)));
@@ -73,7 +73,6 @@ fn separator_split(
 }
 
 // this only has a _separator argument so it can be used as a function pointer
-// for either this or `separator_split`
 fn naive_split(
     source: &EmbeddingSource,
     _separator: &String,
@@ -311,7 +310,6 @@ fn function_split(
     Ok(chunks)
 }
 
-// NOTE: _only_ supports ascii
 pub fn batch_sources(
     sources: &Vec<EmbeddingSource>,
 ) -> Result<Vec<Vec<(EmbeddingSource, String)>>, std::io::Error> {
@@ -427,4 +425,184 @@ pub fn batch_sources(
     );
 
     Ok(batches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_common::*;
+    use crate::write_file;
+
+    use rand::Rng;
+
+    fn random_unicode_string(len: usize) -> String {
+        let mut rng = rand::thread_rng();
+        (0..len)
+            .map(|_| char::from(rng.gen_range(0x0020..0x007E) as u8))
+            .collect()
+    }
+
+    #[test]
+    fn separator_split_test() {
+        let _cleanup = Cleanup;
+        assert!(setup().is_ok());
+
+        let mut rng = rand::thread_rng();
+
+        // TODO: more than just utf-8 in the file generation
+        let mut truth: Vec<(String, (usize, usize))> = Vec::new();
+        for _ in 0..rng.gen_range(2..10) {
+            let length = rng.gen_range(2..10);
+            let subset = if let Some(last) = truth.last() {
+                (last.1 .1 + 1, last.1 .1 + 1 + length)
+            } else {
+                (0, length)
+            };
+
+            truth.push((random_unicode_string(length), subset));
+        }
+
+        let root = crate::config::get_home_dir();
+        let contents = truth
+            .iter()
+            .map(|p| p.0.clone())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let filepath = root.join("testing.rs");
+        write_file!(filepath.clone(), contents.clone());
+        println!("wrote to file: {:?}", contents);
+
+        let split = separator_split(
+            &EmbeddingSource {
+                filepath: filepath.to_string_lossy().to_string(),
+                meta: std::collections::HashSet::new(),
+                subset: None,
+            },
+            &"\n".to_string(),
+        );
+
+        assert!(split.is_ok());
+
+        let mut split = split.unwrap();
+        assert_eq!(split.len(), truth.len());
+
+        split.sort_by(|a, b| a.0.cmp(&b.0));
+        truth.sort_by(|a, b| a.0.cmp(&b.0));
+
+        println!("split: {:?}", split);
+        println!("truth: {:?}", truth);
+
+        for i in 0..split.len() {
+            assert_eq!(split[i].0, truth[i].0);
+            assert_eq!(split[i].1, truth[i].1);
+        }
+    }
+
+    #[test]
+    fn naive_split_test() {
+        let _cleanup = Cleanup;
+        assert!(setup().is_ok());
+
+        let mut rng = rand::thread_rng();
+
+        // TODO: more than just utf-8 in the file generation
+        let mut truth: Vec<(String, (usize, usize))> = Vec::new();
+        for _ in 0..rng.gen_range(2..10) {
+            let subset = if let Some(last) = truth.last() {
+                (last.1 .1 + 1, last.1 .1 + 1 + TOKEN_LIMIT)
+            } else {
+                (0, TOKEN_LIMIT)
+            };
+
+            truth.push((random_unicode_string(TOKEN_LIMIT), subset));
+        }
+
+        let root = crate::config::get_home_dir();
+        let contents = truth
+            .iter()
+            .map(|p| p.0.clone())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let filepath = root.join("testing.rs");
+        write_file!(filepath.clone(), contents.clone());
+        println!("wrote to file: {:?}", contents);
+
+        let split = naive_split(
+            &EmbeddingSource {
+                filepath: filepath.to_string_lossy().to_string(),
+                meta: std::collections::HashSet::new(),
+                subset: None,
+            },
+            &String::new(),
+        );
+
+        assert!(split.is_ok());
+
+        let mut split = split.unwrap();
+        assert_eq!(split.len(), truth.len());
+
+        split.sort_by(|a, b| a.0.cmp(&b.0));
+        truth.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for i in 0..split.len() {
+            assert_eq!(split[i].0, truth[i].0);
+            assert_eq!(split[i].1, truth[i].1);
+        }
+    }
+
+    #[test]
+    fn max_length_split_test() {
+        let _cleanup = Cleanup;
+        assert!(setup().is_ok());
+
+        let mut rng = rand::thread_rng();
+
+        // TODO: more than just utf-8 in the file generation
+        let mut truth: Vec<(String, (usize, usize))> = Vec::new();
+        let length = 100;
+        for _ in 0..rng.gen_range(2..10) {
+            let subset = if let Some(last) = truth.last() {
+                (last.1 .1 + 1, last.1 .1 + 1 + length)
+            } else {
+                (0, length)
+            };
+
+            truth.push((random_unicode_string(length), subset));
+        }
+
+        let root = crate::config::get_home_dir();
+        let contents = truth
+            .iter()
+            .map(|p| p.0.clone())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let filepath = root.join("testing.rs");
+        write_file!(filepath.clone(), contents.clone());
+        println!("wrote to file: {:?}", contents);
+
+        let split = max_length_split(
+            &EmbeddingSource {
+                filepath: filepath.to_string_lossy().to_string(),
+                meta: std::collections::HashSet::new(),
+                subset: None,
+            },
+            &length.to_string(),
+        );
+
+        assert!(split.is_ok());
+
+        let mut split = split.unwrap();
+        assert_eq!(split.len(), truth.len());
+
+        split.sort_by(|a, b| a.0.cmp(&b.0));
+        truth.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for i in 0..split.len() {
+            assert_eq!(split[i].0, truth[i].0);
+            assert_eq!(split[i].1, truth[i].1);
+        }
+    }
 }

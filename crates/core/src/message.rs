@@ -1,8 +1,13 @@
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct DeweyRequest {
+pub struct QueryRequest {
     pub k: usize,
     pub query: String,
     pub filters: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EditRequest {
+    pub filepath: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

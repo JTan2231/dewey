@@ -107,9 +107,7 @@ impl HNSW {
 
         info!("building index from block files");
 
-        let directory = get_directory()?;
-
-        let n = directory.len();
+        let n = get_directory()?.len();
         let m = n.ilog2();
         let l = n.ilog2();
         let p = 1.0 / m as f32;
@@ -136,7 +134,7 @@ impl HNSW {
         }
 
         // TODO: config param?
-        let mut cache = EmbeddingCache::new(CACHE_SIZE);
+        let mut cache = EmbeddingCache::new(CACHE_SIZE)?;
 
         let mut rng = thread_rng();
         let mut layers = vec![HashMap::new(); l as usize];
@@ -264,7 +262,7 @@ impl HNSW {
         // but rust f32 doesn't have Eq so i don't know how to work with it
         let mut top_k: Vec<(u64, f32)> = Vec::new();
 
-        let mut cache = EmbeddingCache::new(CACHE_SIZE);
+        let mut cache = EmbeddingCache::new(CACHE_SIZE).unwrap();
 
         let mut count = 0;
         let mut current = *self.layers[0].keys().next().unwrap();
@@ -337,6 +335,39 @@ impl HNSW {
             .into_iter()
             .map(|(node, distance)| (cache.get(node as u32).unwrap(), distance))
             .collect::<Vec<_>>()
+    }
+
+    // not the most efficient
+    // need to find a workaround the borrow checker
+    pub fn remove_node(&mut self, target_id: u64) {
+        let layer_targets = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| {
+                let t = l.get(&target_id);
+                if t.is_some() {
+                    Some((i, t.unwrap().clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // removing all outgoing edges from neighbors to target_id
+        // i.e., removing all edges (neighbor -> target_id)
+        for lt in layer_targets {
+            for target in lt.1 {
+                let neighbors = self.layers[lt.0].get_mut(&target.0).unwrap();
+                neighbors.retain(|n| n.0 != target_id);
+            }
+        }
+
+        // removing all outgoing edges from target_id
+        // i.e., removing all edges (target_id -> neighbor)
+        for layer in self.layers.iter_mut() {
+            layer.retain(|k, _| *k != target_id);
+        }
     }
 
     pub fn serialize(&self, filepath: &String) -> Result<(), std::io::Error> {

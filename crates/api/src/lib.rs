@@ -23,7 +23,7 @@ impl DeweyClient {
     ) -> Result<message::DeweyResponse, std::io::Error> {
         let mut stream = std::net::TcpStream::connect(format!("{}:{}", self.address, self.port))?;
 
-        let message = message::DeweyRequest {
+        let message = message::QueryRequest {
             query: request,
             k,
             filters,

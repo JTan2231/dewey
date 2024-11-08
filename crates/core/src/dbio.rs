@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Write;
 
 use serialize_macros::Serialize;
 
@@ -21,16 +21,6 @@ pub struct EmbeddingBlock {
 }
 
 impl EmbeddingBlock {
-    pub fn from_file(filename: &str, _block: u64) -> Result<Self, std::io::Error> {
-        let mut file = std::fs::File::open(filename)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-
-        let (embed_block, _) = EmbeddingBlock::from_bytes(&bytes, 0)?;
-
-        Ok(embed_block)
-    }
-
     fn to_file(&self, filename: &str) -> Result<(), std::io::Error> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -43,6 +33,41 @@ impl EmbeddingBlock {
 
         Ok(())
     }
+}
+
+struct DirectoryEntry {
+    id: u32,
+    filepath: String,
+}
+
+pub struct Directory {
+    pub file_map: HashMap<String, u64>,
+    pub id_map: HashMap<u32, u64>,
+    pub file_id_map: HashMap<String, u32>,
+}
+
+impl Directory {
+    pub fn len(&self) -> usize {
+        self.id_map.len()
+    }
+}
+
+fn write_directory(entries: &Vec<(DirectoryEntry, u32)>) -> Result<(), std::io::Error> {
+    let directory = entries
+        .into_iter()
+        .map(|d| format!("{} {} {}", d.0.id, d.0.filepath, d.1))
+        .collect::<Vec<_>>();
+    let count = directory.len();
+    let directory = directory.join("\n");
+
+    std::fs::write(
+        format!("{}/directory", get_data_dir().to_str().unwrap()),
+        directory,
+    )?;
+
+    info!("Wrote directory with {} entries", count);
+
+    Ok(())
 }
 
 // synchronizes the index with the current ledger
@@ -107,23 +132,24 @@ pub fn sync_index(full_embed: bool) -> Result<(), std::io::Error> {
         embedding_block.to_file(&filename)?;
 
         for e in block {
-            directory.push((e.id, i));
+            directory.push((
+                DirectoryEntry {
+                    id: e.id as u32,
+                    filepath: e.source_file.filepath.clone(),
+                },
+                i as u32,
+            ));
         }
     }
 
-    let directory = directory
-        .into_iter()
-        .map(|d| format!("{} {}", d.0, d.1))
-        .collect::<Vec<_>>();
-    let count = directory.len();
-    let directory = directory.join("\n");
-
-    std::fs::write(
-        format!("{}/directory", get_data_dir().to_str().unwrap()),
-        directory,
-    )?;
-
-    info!("Wrote directory with {} entries", count);
+    // TODO: need some sort of follow-up to handle unfinished business regarding the directory
+    match write_directory(&directory) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("error writing directory: {}", e);
+            return Err(e);
+        }
+    };
 
     Ok(())
 }
@@ -146,7 +172,6 @@ pub fn reblock() -> Result<(), std::io::Error> {
     let mut blocks = vec![Vec::new()];
     let mut i = 0;
 
-    let mut directory = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = Vec::new();
     stack.push(*full_graph.iter().nth(0).unwrap().0);
@@ -166,7 +191,6 @@ pub fn reblock() -> Result<(), std::io::Error> {
         }
 
         blocks[i].push(current);
-        directory.push((current, i as u64));
         visited.insert(current);
 
         let mut neighbors = full_graph.get(&current).unwrap().clone();
@@ -179,7 +203,7 @@ pub fn reblock() -> Result<(), std::io::Error> {
         }
     }
 
-    let mut cache = EmbeddingCache::new(10 * BLOCK_SIZE as u32);
+    let mut cache = EmbeddingCache::new(10 * BLOCK_SIZE as u32)?;
 
     // update meta
     let ledger = crate::ledger::read_ledger()?;
@@ -198,6 +222,7 @@ pub fn reblock() -> Result<(), std::io::Error> {
 
     std::fs::create_dir(&temp_dir)?;
 
+    let mut directory = Vec::new();
     for (i, block) in blocks.iter().enumerate() {
         let filename = format!("{}/{}", temp_dir, i);
         let mut embeddings = Vec::new();
@@ -213,6 +238,14 @@ pub fn reblock() -> Result<(), std::io::Error> {
                     embedding.source_file.meta
                 }
             };
+
+            directory.push((
+                DirectoryEntry {
+                    id: embedding.id as u32,
+                    filepath: embedding.source_file.filepath.clone(),
+                },
+                i as u32,
+            ));
 
             embeddings.push(*embedding);
         }
@@ -260,26 +293,22 @@ pub fn reblock() -> Result<(), std::io::Error> {
 
     std::fs::remove_dir_all(&temp_dir)?;
 
-    let directory = directory
-        .into_iter()
-        .map(|d| format!("{} {}", d.0, d.1))
-        .collect::<Vec<_>>();
-    let count = directory.len();
-    let directory = directory.join("\n");
-
-    std::fs::write(
-        format!("{}/directory", get_data_dir().to_str().unwrap()),
-        directory,
-    )?;
-
-    info!("Wrote directory with {} entries", count);
+    match write_directory(&directory) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("error writing directory: {}", e);
+            return Err(e);
+        }
+    };
 
     Ok(())
 }
 
 // filenames should be formatted `/whatever/directories/.../block_number`
 // where `block_number` is a u64
-pub fn read_blocks(filenames: &Vec<String>) -> Result<Vec<Box<Embedding>>, std::io::Error> {
+pub fn read_embedding_blocks(
+    filenames: &Vec<String>,
+) -> Result<Vec<Box<Embedding>>, std::io::Error> {
     let mut embeddings = Vec::new();
     for filename in filenames {
         let block_number = match filename.split("/").last().unwrap().parse::<u64>() {
@@ -296,7 +325,7 @@ pub fn read_blocks(filenames: &Vec<String>) -> Result<Vec<Box<Embedding>>, std::
             }
         };
 
-        let block = EmbeddingBlock::from_file(filename, block_number)?;
+        let block = read_embedding_block(block_number)?;
         embeddings.extend(
             block
                 .embeddings
@@ -310,6 +339,28 @@ pub fn read_blocks(filenames: &Vec<String>) -> Result<Vec<Box<Embedding>>, std::
     }
 
     Ok(embeddings)
+}
+
+pub fn read_embedding_block(block_number: u64) -> Result<EmbeddingBlock, std::io::Error> {
+    let data_dir = get_data_dir();
+
+    let bytes = match std::fs::read(&format!("{}/{}", data_dir.to_str().unwrap(), block_number)) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("error reading block file {}: {}", block_number, e);
+            return Err(e);
+        }
+    };
+
+    let (block, _) = match EmbeddingBlock::from_bytes(&bytes, 0) {
+        Ok(b) => b,
+        Err(e) => {
+            error!("error parsing block file {}: {}", block_number, e);
+            return Err(e);
+        }
+    };
+
+    Ok(block)
 }
 
 pub struct BlockEmbedding {
@@ -339,13 +390,7 @@ pub fn get_all_blocks() -> Result<Vec<BlockEmbedding>, std::io::Error> {
     let mut block_embeddings = Vec::new();
     for block_number in block_numbers {
         let filename = format!("{}/{}", data_dir.to_str().unwrap(), block_number);
-        let block = match EmbeddingBlock::from_file(&filename.clone(), block_number) {
-            Ok(block) => block,
-            Err(e) => {
-                eprintln!("Error reading embedding block {}: {}", block_number, e);
-                return Err(e);
-            }
-        };
+        let block = read_embedding_block(block_number)?;
 
         for be in block
             .embeddings
@@ -368,18 +413,97 @@ pub fn get_all_blocks() -> Result<Vec<BlockEmbedding>, std::io::Error> {
 }
 
 // TODO: at what point should we worry about holding this whole thing in memory?
-pub fn get_directory() -> Result<HashMap<u32, u64>, std::io::Error> {
+pub fn get_directory() -> Result<Directory, std::io::Error> {
     let data_dir = get_data_dir();
     let directory = std::fs::read_to_string(format!("{}/directory", data_dir.to_str().unwrap()))?;
     let directory = directory
         .split("\n")
         .map(|d| {
-            let mut parts = d.split(" ");
-            let id = parts.next().unwrap().parse::<u32>().unwrap();
-            let block = parts.next().unwrap().parse::<u64>().unwrap();
-            (id, block)
-        })
-        .collect::<HashMap<_, _>>();
+            let parts = d.split(" ").collect::<Vec<&str>>();
+            let id = parts[0].parse::<u32>().unwrap();
+            let filepath = parts[1..parts.len() - 1].join("");
+            let block = parts[parts.len() - 1].parse::<u64>().unwrap();
 
-    Ok(directory)
+            (id, filepath, block)
+        })
+        .collect::<Vec<_>>();
+
+    let mut id_map = HashMap::new();
+    let mut file_map = HashMap::new();
+    let mut file_id_map = HashMap::new();
+
+    for entry in directory.iter() {
+        id_map.insert(entry.0, entry.2);
+        file_map.insert(entry.1.clone(), entry.2);
+        file_id_map.insert(entry.1.clone(), entry.0);
+    }
+
+    Ok(Directory {
+        id_map,
+        file_map,
+        file_id_map,
+    })
+}
+
+// TODO: how does this affect indexing?
+//       i think things need reindexed + reblocked after updates here
+pub fn update_file_embeddings(filepath: &str, index: &mut HNSW) -> Result<(), std::io::Error> {
+    let directory = match get_directory() {
+        Ok(d) => d,
+        Err(e) => {
+            error!("error reading directory: {}", e);
+            return Err(e);
+        }
+    };
+
+    let id_start = directory.id_map.len() as u64 + 1;
+
+    let target_block = match directory.file_map.get(filepath) {
+        Some(b) => b,
+        None => {
+            error!(
+                "filepath {} not catalogued in Directory, aborting update",
+                filepath
+            );
+            return Ok(());
+        }
+    };
+
+    let mut block = read_embedding_block(*target_block)?;
+
+    let mut meta = HashSet::new();
+    let mut to_delete = Vec::new();
+    for e in block.embeddings.iter() {
+        if e.source_file.filepath == filepath {
+            meta = e.source_file.meta.clone();
+            to_delete.push(e.id);
+        }
+    }
+
+    block
+        .embeddings
+        .retain(|e| e.source_file.filepath != filepath);
+
+    let mut new_embeddings = embed_bulk(&vec![EmbeddingSource {
+        filepath: filepath.to_string(),
+        meta,
+        subset: None,
+    }])?;
+
+    for (i, e) in new_embeddings.iter_mut().enumerate() {
+        e.id = id_start + i as u64;
+    }
+
+    block.embeddings.extend(new_embeddings);
+
+    let block_path = format!("{}/{}", get_data_dir().to_str().unwrap(), target_block);
+    block.to_file(&block_path)?;
+
+    for node in to_delete {
+        index.remove_node(node);
+    }
+
+    index.serialize(&get_data_dir().join("index").to_str().unwrap().to_string())?;
+
+    Ok(())
 }

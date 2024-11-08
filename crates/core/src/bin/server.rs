@@ -6,7 +6,7 @@ use std::thread;
 use dewey_lib::config;
 use dewey_lib::hnsw::{Filter, Query, HNSW};
 use dewey_lib::logger::Logger;
-use dewey_lib::message::{DeweyRequest, DeweyResponse, DeweyResponseItem};
+use dewey_lib::message::{DeweyResponse, DeweyResponseItem, QueryRequest};
 use dewey_lib::openai::{embed, EmbeddingSource};
 use dewey_lib::serialization::Serialize;
 use dewey_lib::{error, info};
@@ -56,7 +56,7 @@ fn handle_client(mut stream: TcpStream, index: Arc<Mutex<HNSW>>) -> Result<(), s
 
     let request = String::from_utf8_lossy(&buffer);
 
-    let message: DeweyRequest = match serde_json::from_str(&request) {
+    let message: QueryRequest = match serde_json::from_str(&request) {
         Ok(msg) => msg,
         Err(e) => {
             error!("Failed to parse request: {}", e);
