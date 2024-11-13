@@ -6,7 +6,6 @@ use std::thread;
 use dewey_lib::config;
 use dewey_lib::logger::Logger;
 use dewey_lib::message::DeweyRequest;
-use dewey_lib::serialization::Serialize;
 use dewey_lib::{error, info};
 
 struct Flags {
@@ -53,6 +52,7 @@ pub fn main() -> std::io::Result<()> {
     println!("Server listening on {}:{}", flags.address, flags.port);
 
     let state = Arc::new(Mutex::new(dewey_lib::ServerState::new()?));
+    info!("state initialized");
 
     for stream in listener.incoming() {
         match stream {
@@ -101,7 +101,7 @@ pub fn main() -> std::io::Result<()> {
                     bytes.extend((response.len() as u32).to_be_bytes());
                     bytes.extend_from_slice(response.as_bytes());
 
-                    match stream.write(&response.to_bytes()) {
+                    match stream.write(&bytes) {
                         Ok(bytes_written) => {
                             stream.flush().unwrap();
                             info!("wrote {} bytes to stream", bytes_written);

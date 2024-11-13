@@ -1,19 +1,21 @@
+use std::io::{Read, Write};
+
 use crate::hnsw::{Filter, Query, HNSW};
 use crate::logger::Logger;
 use crate::message::{DeweyResponse, DeweyResponseItem, RequestPayload};
 use crate::openai::{embed, EmbeddingSource};
 
-pub mod cache;
+mod cache;
 pub mod config;
 pub mod dbio;
 pub mod hnsw;
 pub mod ledger;
 pub mod logger;
 pub mod message;
-pub mod openai;
-pub mod parsing;
+mod openai;
+mod parsing;
 pub mod serialization;
-pub mod test_common;
+mod test_common;
 
 // all server operations should go through this arc-mutexed state
 // this is needed for thread safety with the addition of db-altering operations
@@ -112,5 +114,83 @@ impl ServerState {
         };
 
         Ok(response)
+    }
+}
+
+pub struct DeweyClient {
+    pub address: String,
+    pub port: u32,
+}
+
+impl DeweyClient {
+    pub fn new(address: String, port: u32) -> Self {
+        Self { address, port }
+    }
+
+    fn send(
+        &self,
+        message: message::DeweyRequest,
+    ) -> Result<message::DeweyResponse, std::io::Error> {
+        let destination = format!("{}:{}", self.address, self.port);
+        let mut stream = std::net::TcpStream::connect(destination.clone())?;
+
+        let message = serde_json::to_string(&message)?;
+        let mut bytes = Vec::new();
+        bytes.extend((message.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(message.as_bytes());
+
+        match stream.write(&bytes) {
+            Ok(_) => {
+                stream.flush().unwrap();
+            }
+            Err(e) => {
+                error!("Failed to write response: {}", e);
+                return Err(e);
+            }
+        };
+
+        let mut length_bytes = [0u8; 4];
+        stream.read_exact(&mut length_bytes)?;
+        let length = u32::from_be_bytes(length_bytes) as usize;
+
+        let mut buffer = vec![0u8; length];
+        stream.read_exact(&mut buffer)?;
+        let buffer = String::from_utf8_lossy(&buffer);
+
+        match serde_json::from_str(&buffer) {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                error!("Failed to parse response: {}", e);
+                error!("buffer: {:?}", buffer);
+                return Err(e.into());
+            }
+        }
+    }
+
+    pub fn query(
+        &self,
+        request: String,
+        k: usize,
+        filters: Vec<String>,
+    ) -> Result<message::DeweyResponse, std::io::Error> {
+        let message = message::DeweyRequest {
+            message_type: "query".to_string(),
+            payload: message::RequestPayload::Query {
+                query: request,
+                k,
+                filters,
+            },
+        };
+
+        self.send(message)
+    }
+
+    pub fn reindex(&self, filepath: String) -> Result<message::DeweyResponse, std::io::Error> {
+        let message = message::DeweyRequest {
+            message_type: "edit".to_string(),
+            payload: message::RequestPayload::Edit { filepath },
+        };
+
+        self.send(message)
     }
 }
