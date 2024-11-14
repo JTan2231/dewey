@@ -11,6 +11,7 @@ cc="*"
 
 [features]
 default = ["server", "cli"]
+regression = []
 cli = []
 server = []
 stdout = []

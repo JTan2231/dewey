@@ -15,7 +15,7 @@ pub mod message;
 mod openai;
 mod parsing;
 pub mod serialization;
-mod test_common;
+pub mod test_common;
 
 // all server operations should go through this arc-mutexed state
 // this is needed for thread safety with the addition of db-altering operations
@@ -42,12 +42,25 @@ impl ServerState {
             }
         };
 
+        info!("payload unpacked");
+
         let timestamp = chrono::Utc::now().timestamp_micros();
         let path = config::get_local_dir()
             .join("queries")
             .join(timestamp.to_string());
-        std::fs::write(path.clone(), query).unwrap();
-        info!("Wrote query to {}", path.to_string_lossy());
+        match std::fs::write(path.clone(), query) {
+            Ok(_) => {
+                info!("Wrote query to {}", path.to_string_lossy());
+            }
+            Err(e) => {
+                error!(
+                    "error writing query to file {}: {}",
+                    path.to_string_lossy(),
+                    e
+                );
+                return Err(e);
+            }
+        };
 
         let embedding = match embed(&EmbeddingSource {
             filepath: path.to_string_lossy().to_string(),
@@ -60,6 +73,8 @@ impl ServerState {
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
             }
         };
+
+        info!("embedding created");
 
         let filters = filters
             .iter()

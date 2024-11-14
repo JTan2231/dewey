@@ -7,10 +7,10 @@ use serialize_macros::Serialize;
 use crate::cache::EmbeddingCache;
 use crate::config::get_data_dir;
 use crate::dbio::{get_directory, BLOCK_SIZE};
-use crate::info;
 use crate::logger::Logger;
 use crate::openai::{Embedding, EMBED_DIM};
 use crate::serialization::Serialize;
+use crate::{error, info};
 
 pub fn dot(a: &Embedding, b: &Embedding) -> f32 {
     let mut sum = 0.;
@@ -101,7 +101,15 @@ impl HNSW {
         if !reindex {
             info!("loading index from disk");
             let data_dir = get_data_dir();
-            let hnsw = Self::deserialize(data_dir.join("index").to_string_lossy().to_string())?;
+            let hnsw = match Self::deserialize(data_dir.join("index").to_string_lossy().to_string())
+            {
+                Ok(h) => h,
+                Err(e) => {
+                    error!("Error reading index: {}", e);
+                    return Err(e);
+                }
+            };
+
             return Ok(hnsw);
         }
 
@@ -388,7 +396,7 @@ impl HNSW {
     pub fn deserialize(filepath: String) -> Result<Self, std::io::Error> {
         info!("deserializing index from {}", filepath);
 
-        let mut file = std::fs::File::open(filepath)?;
+        let mut file = std::fs::File::open(filepath.clone())?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
 

@@ -4,7 +4,7 @@ use crate::ledger::{get_indexing_rules, IndexRuleType};
 use crate::openai::EmbeddingSource;
 
 use crate::logger::Logger;
-use crate::{error, info};
+use crate::{error, info, lprint};
 
 pub fn read_source(source: &EmbeddingSource) -> Result<String, std::io::Error> {
     let mut file = match std::fs::File::open(&source.filepath) {
@@ -316,7 +316,12 @@ pub fn batch_sources(
     let indexing_rules = get_indexing_rules()?;
     let base = Vec::new();
     let global_rules = indexing_rules.get("*").unwrap_or(&base);
-    info!("batching with rules: {:?}", indexing_rules);
+    info!(
+        "batching {} sources with rules: {:?}",
+        sources.len(),
+        indexing_rules
+    );
+
     // API requests need batched up to keep from exceeding token limits
     let mut batches: Vec<Vec<(EmbeddingSource, String)>> = vec![Vec::new()];
     for source in sources {

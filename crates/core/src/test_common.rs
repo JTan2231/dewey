@@ -63,8 +63,16 @@ pub fn get_meta() -> Vec<String> {
     ]
 }
 
+macro_rules! test_print {
+    ($($arg:tt)*) => {
+        if !cfg!(feature = "regression") {
+            println!("{}", format!($($arg)*));
+        }
+    }
+}
+
 pub fn setup() -> Result<(), std::io::Error> {
-    println!("===BEGIN SETUP===");
+    test_print!("===BEGIN SETUP===");
     crate::config::setup();
     let root = crate::config::get_home_dir();
     let config = crate::config::get_config_dir();
@@ -83,17 +91,17 @@ pub fn setup() -> Result<(), std::io::Error> {
     .join("\n");
 
     write_file!(config.join("ledger"), ledger_contents.clone());
-    println!("set ledger with:\n{}\n", ledger_contents);
+    test_print!("set ledger with:\n{}\n", ledger_contents);
 
     let rule_contents = vec![
-        "* --minlength 128 --maxlength 512 --alphanumeric true",
-        "rs --code function",
+        "* --minlength 0 --maxlength 512 --alphanumeric true",
+        "rs --naive",
         "md --split \\n",
     ]
     .join("\n");
 
     write_file!(config.join("rules"), rule_contents.clone());
-    println!("set rules with:\n{}\n", rule_contents);
+    test_print!("set rules with:\n{}\n", rule_contents);
 
     create_dir!(target.join(".git"));
     create_file!(target.join(".git").join("whatever"));
@@ -105,7 +113,7 @@ pub fn setup() -> Result<(), std::io::Error> {
     create_dir!(target.join("ignore"));
 
     for tf in tracked_files.iter() {
-        write_file!(target.join(tf), "a");
+        write_file!(target.join(tf), "a".repeat(10000));
     }
 
     for utf in untracked_files.iter() {
@@ -116,13 +124,13 @@ pub fn setup() -> Result<(), std::io::Error> {
 
     let gitignore_contents = "*.md\n/ignore";
     write_file!(target.join(".gitignore"), gitignore_contents);
-    println!(
+    test_print!(
         "set {} with:\n{}\n",
         target.join(".gitignore").to_str().unwrap(),
-        gitignore_contents
+        gitignore_contents,
     );
 
-    println!("===END SETUP===\n");
+    test_print!("===END SETUP===\n");
 
     Ok(())
 }

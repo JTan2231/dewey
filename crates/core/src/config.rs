@@ -22,7 +22,7 @@ fn touch_file(path: &std::path::PathBuf) {
 }
 
 pub fn get_home_dir() -> std::path::PathBuf {
-    if cfg!(test) {
+    if cfg!(test) || cfg!(feature = "regression") {
         std::env::temp_dir().join("dewey_testing")
     } else {
         match std::env::var("HOME")
@@ -59,6 +59,12 @@ pub fn setup() {
         false => chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string(),
     };
 
+    let now = if cfg!(feature = "regression") {
+        "regression".to_string()
+    } else {
+        now
+    };
+
     match std::env::var("OPENAI_API_KEY") {
         Ok(_) => (),
         Err(_) => panic!("OPENAI_API_KEY environment variable not set"),
@@ -67,12 +73,27 @@ pub fn setup() {
     let config_path = get_config_dir();
     let local_path = get_local_dir();
     let data_path = get_data_dir();
-    let logging_path = local_path.join("logs");
+
+    let queries_path = local_path.join("queries");
+    let logging_path = match std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .or_else(|_| {
+            std::env::var("HOMEDRIVE").and_then(|homedrive| {
+                std::env::var("HOMEPATH").map(|homepath| format!("{}{}", homedrive, homepath))
+            })
+        }) {
+        Ok(dir) => std::path::PathBuf::from(dir),
+        Err(_) => panic!("Failed to get home directory"),
+    }
+    .join(".local")
+    .join("dewey")
+    .join("logs");
 
     create_if_nonexistent(&local_path);
     create_if_nonexistent(&config_path);
     create_if_nonexistent(&logging_path);
     create_if_nonexistent(&data_path);
+    create_if_nonexistent(&queries_path);
 
     crate::logger::Logger::init(format!(
         "{}/{}.log",

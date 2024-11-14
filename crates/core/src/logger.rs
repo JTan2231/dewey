@@ -8,11 +8,6 @@ pub struct Logger {
 static mut INSTANCE: Option<Logger> = None;
 static INIT: Once = Once::new();
 
-#[cfg(feature = "stdout")]
-pub const USE_STDOUT: bool = true;
-#[cfg(not(feature = "stdout"))]
-pub const USE_STDOUT: bool = false;
-
 impl Logger {
     pub fn init(filename: String) -> &'static Logger {
         unsafe {
@@ -46,10 +41,6 @@ impl Logger {
 
             let message = format!("{} [INFO]: {}", chrono::Local::now(), message);
             writeln!(file, "{}", message).expect("Failed to write to log file");
-
-            if USE_STDOUT {
-                println!("{}", message);
-            }
         }
     }
 
@@ -68,10 +59,6 @@ impl Logger {
 
             let message = format!("{} [ERROR]: {}", chrono::Local::now(), message);
             writeln!(file, "{}", message).expect("Failed to write to log file");
-
-            if USE_STDOUT {
-                println!("{}", message);
-            }
         }
     }
 }
@@ -87,5 +74,13 @@ macro_rules! info {
 macro_rules! error {
     ($($arg:tt)*) => {
         Logger::error(format!($($arg)*));
+    }
+}
+
+#[macro_export]
+macro_rules! lprint {
+    ($method:tt, $($arg:tt)*) => {
+        println!("{}", format!($($arg)*));
+        Logger::$method(format!($($arg)*));
     }
 }

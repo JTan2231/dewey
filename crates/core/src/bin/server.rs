@@ -6,7 +6,7 @@ use std::thread;
 use dewey_lib::config;
 use dewey_lib::logger::Logger;
 use dewey_lib::message::DeweyRequest;
-use dewey_lib::{error, info};
+use dewey_lib::{error, info, lprint};
 
 struct Flags {
     address: String,
@@ -48,11 +48,15 @@ pub fn main() -> std::io::Result<()> {
     let flags = parse_flags();
 
     let listener = TcpListener::bind(format!("{}:{}", flags.address, flags.port)).unwrap();
-    info!("Server listening on {}:{}", flags.address, flags.port);
-    println!("Server listening on {}:{}", flags.address, flags.port);
+    lprint!(info, "Server listening on {}:{}", flags.address, flags.port);
+
+    lprint!(
+        info,
+        "Compiled for regression testing: {}",
+        cfg!(feature = "regression")
+    );
 
     let state = Arc::new(Mutex::new(dewey_lib::ServerState::new()?));
-    info!("state initialized");
 
     for stream in listener.incoming() {
         match stream {
@@ -62,11 +66,18 @@ pub fn main() -> std::io::Result<()> {
                     let mut state = state.lock().unwrap();
 
                     let mut size_buffer = [0u8; 4];
-                    stream.read_exact(&mut size_buffer).unwrap();
+                    match stream.read_exact(&mut size_buffer) {
+                        Ok(_) => {}
+                        Err(e) => error!("Error reading size header: {}", e),
+                    };
+
                     let message_size = u32::from_be_bytes(size_buffer) as usize;
 
                     let mut buffer = vec![0u8; message_size];
-                    stream.read_exact(&mut buffer).unwrap();
+                    match stream.read_exact(&mut buffer) {
+                        Ok(_) => {}
+                        Err(e) => error!("Error reading message: {}", e),
+                    };
 
                     let request: DeweyRequest =
                         match serde_json::from_str(&String::from_utf8_lossy(&buffer)) {
@@ -113,10 +124,12 @@ pub fn main() -> std::io::Result<()> {
                 });
             }
             Err(e) => {
-                info!("Error: {}", e);
+                info!("Error reading stream: {}", e);
             }
         }
     }
+
+    lprint!(info, "shutting down server");
 
     Ok(())
 }

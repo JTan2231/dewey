@@ -1,4 +1,5 @@
 use dewey_lib::logger::Logger;
+use dewey_lib::lprint;
 use dewey_lib::{config, dbio, hnsw, info, ledger};
 
 struct Flags {
@@ -146,6 +147,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config::setup();
     let flags = parse_flags();
     let mut no_flags = true;
+
+    lprint!(
+        info,
+        "Compiled for regression testing: {}",
+        cfg!(feature = "regression")
+    );
 
     if flags.help {
         usage();

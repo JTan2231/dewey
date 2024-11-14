@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
 use crate::logger::Logger;
-use crate::{error, info};
+use crate::{error, info, lprint};
 
 // TODO: there needs to be better delineation on the different rule types
 //       Currently, MinLength and Alphanumeric act as filters,
@@ -269,6 +269,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut meta_index = 0;
     let mut config_entries = Vec::new();
+
     for config_entry in config_ledger.iter_mut() {
         let entry = &mut config_entry.filepath;
         if entry.starts_with("#") {
@@ -372,8 +373,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
 
         meta_index += 1;
 
-        info!("Kept {} files from {}", kept, entry);
-        println!("Kept {} files from {}", kept, entry);
+        lprint!(info, "Kept {} files from {}", kept, entry);
     }
 
     info!("{} config entries", config_entries.len());
@@ -387,8 +387,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect::<Vec<_>>();
 
-    info!("New ledger size: {}", new_ledger.len());
-    println!("New ledger size: {}", new_ledger.len());
+    lprint!(info, "New ledger size: {}", new_ledger.len());
 
     match std::fs::OpenOptions::new()
         .write(true)

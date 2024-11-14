@@ -245,6 +245,7 @@ impl EmbeddingApiClient for TestApiCall {
     ) -> Result<Vec<Embedding>, std::io::Error> {
         let mut embeddings = Vec::new();
         let mut rng = rand::thread_rng();
+
         for (i, b) in batch.iter().enumerate() {
             let embedding = Embedding {
                 id: i as u64,
@@ -269,6 +270,12 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
     let (tx, rx) = std::sync::mpsc::channel::<Vec<(EmbeddingSource, String)>>();
     let rx = Arc::new(Mutex::new(rx));
 
+    let api_call = if cfg!(feature = "regression") {
+        TestApiCall::embedding_api_call
+    } else {
+        ApiClient::embedding_api_call
+    };
+
     // API requests need batched up to keep from exceeding token limits
     let batches = batch_sources(&sources)?;
 
@@ -283,7 +290,7 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
             let batch = thread_rx.lock().unwrap().recv();
             match batch {
                 Ok(batch) => {
-                    match ApiClient::embedding_api_call(&params, &batch) {
+                    match api_call(&params, &batch) {
                         Ok(new_embeddings) => {
                             let mut embeddings = embeddings.lock().unwrap();
                             embeddings.extend(new_embeddings);
@@ -300,8 +307,9 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
                         }
                     };
                 }
-                Err(_) => {
-                    info!("Thread {} exiting", i);
+                Err(e) => {
+                    error!("Error in thread {}, exiting: {}", i, e);
+                    break;
                 }
             }
         });
@@ -348,7 +356,13 @@ pub fn embed(source: &EmbeddingSource) -> Result<Embedding, std::io::Error> {
         ));
     }
 
-    match ApiClient::embedding_api_call(
+    let api_call = if cfg!(feature = "regression") {
+        TestApiCall::embedding_api_call
+    } else {
+        ApiClient::embedding_api_call
+    };
+
+    match api_call(
         &RequestParams::new(),
         &vec![(source.clone(), query.clone())],
     ) {
@@ -357,15 +371,5 @@ pub fn embed(source: &EmbeddingSource) -> Result<Embedding, std::io::Error> {
             error!("Failed to embed query \"{}\": {:?}", query, e);
             return Err(e);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bulk_call_test() {
-        // TODO: implementation pending batch testing
     }
 }
