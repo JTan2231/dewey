@@ -6,12 +6,12 @@ use std::thread;
 
 use rand::Rng;
 
+use chamber_common::Logger;
+use chamber_common::{error, info};
 use serialize_macros::Serialize;
 
-use crate::logger::Logger;
 use crate::parsing::{batch_sources, read_source, TOKEN_LIMIT};
 use crate::serialization::Serialize;
-use crate::{error, info};
 
 pub const EMBED_DIM: usize = 1536;
 
@@ -262,9 +262,10 @@ impl EmbeddingApiClient for TestApiCall {
 
 // multithreaded wrapper over the actual bulk API call
 pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std::io::Error> {
+    println!("embedding bulk");
     let params = RequestParams::new();
 
-    // there's probably a better programmatic way of determining this
+    // TODO: there's probably a better programmatic way of determining this
     const NUM_THREADS: usize = 8;
     let mut thread_pool = Vec::new();
     let (tx, rx) = std::sync::mpsc::channel::<Vec<(EmbeddingSource, String)>>();
@@ -278,6 +279,7 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
 
     // API requests need batched up to keep from exceeding token limits
     let batches = batch_sources(&sources)?;
+    println!("finished batching");
 
     let embeddings = Arc::new(Mutex::new(Vec::new()));
     let count = Arc::new(Mutex::new(0));
@@ -347,7 +349,7 @@ pub fn embed_bulk(sources: &Vec<EmbeddingSource>) -> Result<Vec<Embedding>, std:
 
 pub fn embed(source: &EmbeddingSource) -> Result<Embedding, std::io::Error> {
     let query = read_source(source)?;
-    if query.len() == 0 || query.len() > TOKEN_LIMIT {
+    if query.len() == 0 {
         error!("Invalid query size: {}", query.len());
         error!("Query must be between 1 and {} characters", TOKEN_LIMIT);
         return Err(std::io::Error::new(
@@ -355,6 +357,16 @@ pub fn embed(source: &EmbeddingSource) -> Result<Embedding, std::io::Error> {
             "Failed to read source",
         ));
     }
+
+    let query = if query.len() >= 8192 {
+        error!(
+            "Dewey: Embed received a source that's too long! Trimming {:?}",
+            source
+        );
+        query.chars().take(8191).collect()
+    } else {
+        query
+    };
 
     let api_call = if cfg!(feature = "regression") {
         TestApiCall::embedding_api_call

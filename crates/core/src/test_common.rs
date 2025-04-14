@@ -33,7 +33,7 @@ macro_rules! write_file {
 pub struct Cleanup;
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(crate::config::get_home_dir()).unwrap()
+        std::fs::remove_dir_all(chamber_common::get_root_dir()).unwrap()
     }
 }
 
@@ -73,9 +73,10 @@ macro_rules! test_print {
 
 pub fn setup() -> Result<(), std::io::Error> {
     test_print!("===BEGIN SETUP===");
+    chamber_common::Workspace::new("/tmp/dewey_testing");
     crate::config::setup();
-    let root = crate::config::get_home_dir();
-    let config = crate::config::get_config_dir();
+    let root = chamber_common::get_root_dir();
+    let config = chamber_common::get_config_dir();
 
     let target = root.join("test_repo");
 

@@ -1,69 +1,66 @@
-use std::io::{Read, Write};
+use chamber_common::Logger;
+use chamber_common::{error, get_data_dir, info, lprint};
 
+use crate::cache::EmbeddingCache;
+use crate::dbio::BLOCK_SIZE;
 use crate::hnsw::{Filter, Query, HNSW};
-use crate::logger::Logger;
-use crate::message::{DeweyResponse, DeweyResponseItem, RequestPayload};
-use crate::openai::{embed, EmbeddingSource};
+pub use crate::openai::{embed, EmbeddingSource};
 
 mod cache;
 pub mod config;
 pub mod dbio;
 pub mod hnsw;
 pub mod ledger;
-pub mod logger;
-pub mod message;
 mod openai;
 mod parsing;
 pub mod serialization;
 pub mod test_common;
 
-// all server operations should go through this arc-mutexed state
-// this is needed for thread safety with the addition of db-altering operations
-pub struct ServerState {
+pub struct Dewey {
     index: hnsw::HNSW,
+    cache: EmbeddingCache,
 }
 
-impl ServerState {
-    pub fn new() -> Result<Self, std::io::Error> {
+impl Dewey {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        crate::config::setup()?;
+
+        lprint!(info, "Dewey: Verifying OpenAI API key...");
+        let key = std::env::var("OPENAI_API_KEY").map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("OpenAI API key not found: {}", e),
+            )
+        })?;
+
+        if key.is_empty() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "OpenAI API key is empty",
+            )));
+        }
+
+        // We're rebuilding the index from the blocks for now because it's assumed that the number
+        // of messages will be small enough to warrant this
+        // More than a few blocks, however. will probably warrant some sort of process for building
+        // these in the background
+        //
+        // TODO: Figure something out to keep the index fresh without compromising performance
         Ok(Self {
-            index: HNSW::new(false)?,
+            index: HNSW::new(true)?,
+            cache: EmbeddingCache::new((20 * BLOCK_SIZE) as u32)?,
         })
     }
 
-    pub fn query(&self, payload: RequestPayload) -> Result<String, std::io::Error> {
-        let (query, filters, k) = match payload {
-            RequestPayload::Query { query, filters, k } => (query, filters, k),
-            _ => {
-                error!("malformed query request: {:?}", payload);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed query request",
-                ));
-            }
-        };
-
-        info!("payload unpacked");
-
-        let timestamp = chrono::Utc::now().timestamp_micros();
-        let path = config::get_local_dir()
-            .join("queries")
-            .join(timestamp.to_string());
-        match std::fs::write(path.clone(), query) {
-            Ok(_) => {
-                info!("Wrote query to {}", path.to_string_lossy());
-            }
-            Err(e) => {
-                error!(
-                    "error writing query to file {}: {}",
-                    path.to_string_lossy(),
-                    e
-                );
-                return Err(e);
-            }
-        };
-
+    // TODO: better define how filters should be passed
+    pub fn query(
+        &mut self,
+        query_filepath: &str,
+        filters: Vec<String>,
+        k: usize,
+    ) -> Result<Vec<EmbeddingSource>, std::io::Error> {
         let embedding = match embed(&EmbeddingSource {
-            filepath: path.to_string_lossy().to_string(),
+            filepath: query_filepath.to_string(),
             meta: std::collections::HashSet::new(),
             subset: None,
         }) {
@@ -74,8 +71,6 @@ impl ServerState {
             }
         };
 
-        info!("embedding created");
-
         let filters = filters
             .iter()
             .map(|f| Filter::from_string(&f.to_string()).unwrap())
@@ -83,129 +78,79 @@ impl ServerState {
 
         let query = Query { embedding, filters };
 
-        let mut index_results = Vec::new();
-        let result = self.index.query(&query, k, 200);
-
-        index_results.extend(result.iter().map(|p| DeweyResponseItem {
-            filepath: p.0.source_file.filepath.clone(),
-            subset: match p.0.source_file.subset {
-                Some(s) => s,
-                None => (0, 0),
-            },
-        }));
-
-        let response = DeweyResponse {
-            results: index_results,
-        };
-
-        let response = match serde_json::to_string(&response) {
-            Ok(serialized_response) => serialized_response,
-            Err(e) => {
-                error!("Failed to serialize response: {}", e);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-            }
-        };
-
-        Ok(response)
+        Ok(self
+            .index
+            .query(&mut self.cache, &query, k, 200)
+            .iter()
+            .map(|p| p.0.source_file.clone())
+            .collect())
     }
 
-    // this returns an empty json object {} on success
+    // This returns an empty json object {} on success
     // or an object with just an `error` key on error
-    pub fn reindex(&mut self, payload: RequestPayload) -> Result<String, std::io::Error> {
-        let filepath = match payload {
-            RequestPayload::Edit { filepath } => filepath,
-            _ => {
-                error!("malformed edit request: {:?}", payload);
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed edit request",
-                ));
-            }
-        };
-
-        let response = match crate::dbio::update_file_embeddings(&filepath, &mut self.index) {
-            Ok(_) => "{}".to_string(),
-            Err(e) => format!("{{error: {}}}", e),
-        };
-
-        Ok(response)
-    }
-}
-
-pub struct DeweyClient {
-    pub address: String,
-    pub port: u32,
-}
-
-impl DeweyClient {
-    pub fn new(address: String, port: u32) -> Self {
-        Self { address, port }
+    pub fn reindex(&mut self, filepath: String) -> Result<(), std::io::Error> {
+        crate::dbio::update_file_embeddings(&filepath, &mut self.index)
     }
 
-    fn send(
-        &self,
-        message: message::DeweyRequest,
-    ) -> Result<message::DeweyResponse, std::io::Error> {
-        let destination = format!("{}:{}", self.address, self.port);
-        let mut stream = std::net::TcpStream::connect(destination.clone())?;
+    /// Add a new embedding to the system from the given file
+    ///
+    /// This updates both:
+    /// - The embedding store in the OS file system
+    /// - The in-memory HNSW index
+    ///
+    /// Alongside related metadata + other housekeeping files in the OS filesystem:
+    /// - Embedding store directory
+    /// - HNSW index file
+    pub fn add_embedding(&mut self, filepath: String) -> Result<(), std::io::Error> {
+        let mut embedding = embed(&EmbeddingSource {
+            filepath,
+            subset: None,
+            meta: std::collections::HashSet::new(),
+        })?;
 
-        let message = serde_json::to_string(&message)?;
-        let mut bytes = Vec::new();
-        bytes.extend((message.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(message.as_bytes());
+        // TODO: ledger integration here at some point
+        //       from what I understand the ledger is only for syncing
+        //       between the local file system and the embedding store
+        //       since William is adding things to the store directly,
+        //       it can bypass the ledger
+        //       but it would be nice to have file/embedding syncing
+        //       and tracking all taking place in one spot (the ledger)
 
-        match stream.write(&bytes) {
-            Ok(_) => {
-                stream.flush().unwrap();
-            }
+        match dbio::add_new_embedding(&mut embedding) {
+            Ok(_) => {}
             Err(e) => {
-                error!("Failed to write response: {}", e);
+                error!("error adding embedding to store: {}", e);
                 return Err(e);
             }
         };
 
-        let mut length_bytes = [0u8; 4];
-        stream.read_exact(&mut length_bytes)?;
-        let length = u32::from_be_bytes(length_bytes) as usize;
+        lprint!(info, "Created embedding with id: {}", embedding.id);
+        lprint!(info, "Finished writing embedding to file system");
 
-        let mut buffer = vec![0u8; length];
-        stream.read_exact(&mut buffer)?;
-        let buffer = String::from_utf8_lossy(&buffer);
+        self.cache.refresh_directory()?;
+        lprint!(info, "Refreshed cache directory");
 
-        match serde_json::from_str(&buffer) {
-            Ok(resp) => Ok(resp),
+        match self.index.insert(&mut self.cache, &embedding) {
+            Ok(_) => {}
             Err(e) => {
-                error!("Failed to parse response: {}", e);
-                error!("buffer: {:?}", buffer);
-                return Err(e.into());
+                error!("Error adding embedding to index: {}", e);
+                return Err(e);
             }
-        }
-    }
-
-    pub fn query(
-        &self,
-        request: String,
-        k: usize,
-        filters: Vec<String>,
-    ) -> Result<message::DeweyResponse, std::io::Error> {
-        let message = message::DeweyRequest {
-            message_type: "query".to_string(),
-            payload: message::RequestPayload::Query {
-                query: request,
-                k,
-                filters,
-            },
         };
 
-        self.send(message)
-    }
-
-    pub fn reindex(&self, filepath: String) -> Result<message::DeweyResponse, std::io::Error> {
-        let message = message::DeweyRequest {
-            message_type: "edit".to_string(),
-            payload: message::RequestPayload::Edit { filepath },
+        match self
+            .index
+            .serialize(&get_data_dir().join("index").to_str().unwrap().to_string())
+        {
+            Ok(_) => {}
+            Err(e) => {
+                error!("error serializing index: {}", e);
+                return Err(e);
+            }
         };
 
-        self.send(message)
+        lprint!(info, "Updated index with new embedding");
+
+        Ok(())
     }
 }

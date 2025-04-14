@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 
-use crate::logger::Logger;
-use crate::{error, info, lprint};
+use chamber_common::Logger;
+use chamber_common::{error, get_config_dir, get_local_dir, info, lprint};
 
 // TODO: there needs to be better delineation on the different rule types
 //       Currently, MinLength and Alphanumeric act as filters,
@@ -83,7 +83,7 @@ pub struct LedgerEntry {
 }
 
 pub fn read_ledger() -> Result<Vec<LedgerEntry>, std::io::Error> {
-    let ledger_path = crate::config::get_local_dir().join("ledger");
+    let ledger_path = get_local_dir().join("ledger");
     let ledger_file = std::fs::File::open(&ledger_path).expect("Failed to open ledger file");
 
     let mut reader = std::io::BufReader::new(ledger_file);
@@ -150,7 +150,7 @@ fn get_hash(filepath: &String) -> Result<String, std::io::Error> {
 //   - `rule_type` is the type of rule to apply
 //   - `value` is the value of the rule
 pub fn get_indexing_rules() -> Result<HashMap<String, Vec<IndexRule>>, std::io::Error> {
-    let config_path = crate::config::get_config_dir();
+    let config_path = get_config_dir();
     let config_index_path = config_path.join("rules");
 
     let file = std::fs::File::open(&config_index_path)?;
@@ -229,7 +229,7 @@ struct ConfigEntry {
 //
 // files in the config ledger can be commented out with `#`
 pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::config::get_config_dir();
+    let config_path = get_config_dir();
     let config_ledger_path = config_path.join("ledger");
 
     let config_ledger = std::fs::read_to_string(&config_ledger_path)?;
@@ -392,7 +392,7 @@ pub fn sync_ledger_config() -> Result<(), Box<dyn std::error::Error>> {
     match std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
-        .open(crate::config::get_local_dir().join("ledger"))
+        .open(get_local_dir().join("ledger"))
     {
         Ok(mut file) => {
             for entry in new_ledger {
@@ -422,6 +422,7 @@ mod tests {
     use super::*;
     use crate::test_common::*;
     use crate::write_file;
+    use chamber_common::get_root_dir;
 
     #[test]
     fn read_ruleset_test() {
@@ -484,7 +485,7 @@ mod tests {
         assert!(setup().is_ok());
         assert!(sync_ledger_config().is_ok());
 
-        let ledger_path = crate::config::get_local_dir().join("ledger");
+        let ledger_path = get_local_dir().join("ledger");
 
         let ledger_result = std::fs::read_to_string(ledger_path);
         assert!(ledger_result.is_ok());
@@ -517,13 +518,9 @@ mod tests {
         assert!(sync_ledger_config().is_ok());
 
         let new_files = vec![
-            crate::config::get_home_dir()
-                .join("test_repo")
-                .join("new_rs.rs"),
-            crate::config::get_home_dir()
-                .join("test_repo")
-                .join("no_extension"),
-            crate::config::get_home_dir() // untracked .md file
+            get_root_dir().join("test_repo").join("new_rs.rs"),
+            get_root_dir().join("test_repo").join("no_extension"),
+            get_root_dir() // untracked .md file
                 .join("test_repo")
                 .join("new_md.md"),
         ];
@@ -535,7 +532,7 @@ mod tests {
 
         assert!(sync_ledger_config().is_ok());
 
-        let ledger_path = crate::config::get_local_dir().join("ledger");
+        let ledger_path = get_local_dir().join("ledger");
 
         let ledger_result = std::fs::read_to_string(ledger_path);
         assert!(ledger_result.is_ok());

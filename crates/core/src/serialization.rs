@@ -1,5 +1,3 @@
-use crate::info;
-use crate::logger::Logger;
 use crate::openai::EMBED_DIM;
 
 pub trait Serialize {
@@ -235,5 +233,16 @@ impl<T: Serialize + std::hash::Hash + std::cmp::Eq> Serialize for std::collectio
         }
 
         Ok((values, total_size))
+    }
+}
+
+impl Serialize for std::path::PathBuf {
+    fn to_bytes(&self) -> Vec<u8> {
+        self.to_string_lossy().to_string().to_bytes()
+    }
+
+    fn from_bytes(bytes: &[u8], cursor: usize) -> Result<(Self, usize), std::io::Error> {
+        let (string, count) = String::from_bytes(bytes, cursor)?;
+        Ok((std::path::PathBuf::from(string), count))
     }
 }

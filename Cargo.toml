@@ -2,5 +2,4 @@
 members = [
     "crates/core",
     "crates/serialize_macros",
-    "crates/regression"
 ]

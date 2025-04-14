@@ -10,21 +10,8 @@ rustflags = ["-Z", "macro-backtrace"]
 cc="*"
 
 [features]
-default = ["server", "cli"]
 regression = []
-cli = []
-server = []
 stdout = []
-
-[[bin]]
-name = "dewey_server"
-path = "src/bin/server.rs"
-required-features = ["server"]
-
-[[bin]]
-name = "dewey"
-path = "src/bin/cli.rs"
-required-features = ["cli"]
 
 [lib]
 name = "dewey_lib"
@@ -42,7 +29,9 @@ serde_json = "1.0.122"
 sha2 = "0.10.8"
 syn = "2.0.76"
 serialize_macros = { path = "../serialize_macros" }
+chamber-common = { git = "https://github.com/JTan2231/chamber-common.git" }
 tree-sitter = "0.22"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 tree-sitter-javascript = "0.21"
+ordered-float = "4.5.0"
